@@ -1,5 +1,38 @@
 # InkFlow
 
+InkFlow 是一个用于学习 LangGraph 的内容工作流项目。当前阶段先实现最小流程：读取一段本地文本，经过预处理、草稿生成和人工审核标记，然后在终端输出结果。
+
+## 快速运行
+
+当前入口是 `src/inkflow/main.py`，可以用默认配置运行：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m inkflow.main
+```
+
+默认会读取项目根目录下的 `config.toml`：
+
+```toml
+input_path = "note.md"
+```
+
+如果想临时指定其它输入文件，可以用 `--input` 覆盖配置文件里的 `input_path`：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m inkflow.main --input README.md
+```
+
+也可以通过 `--config` 指定另一份配置文件：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m inkflow.main --config config.toml
+```
+
+当前版本只会读取指定的本地文件，并把生成的草稿打印到终端；还不会写入博客仓库，也不会执行发布或推送操作。
+
 ## 技术选型
 
 LangGraph，其基于状态机设计，非常适合我这种多阶段处理和人工介入的设计
