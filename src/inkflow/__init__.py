@@ -1,2 +1,1 @@
-"""InkFlow learning project package."""
-
+"""InkFlow 学习项目包。"""

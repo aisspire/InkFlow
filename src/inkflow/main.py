@@ -1,22 +1,22 @@
-"""Command line entrypoint for trying the first InkFlow graph."""
+"""用于尝试第一版 InkFlow 图的命令行入口。"""
 
 from inkflow.graph import build_graph
 from inkflow.state import InkFlowState
 
 
 def main() -> None:
-    """Run the minimal workflow once with example input."""
+    """使用示例输入运行一次最小工作流。"""
 
     app = build_graph()
 
-    # This is the initial state sent into the graph.
-    # Later, raw_text can come from a Markdown file, RSS item, or GitHub release.
+    # 这是传入图的初始状态。
+    # 后续 raw_text 可以来自 Markdown 文件、RSS 条目或 GitHub Release。
     initial_state: InkFlowState = {
         "raw_text": "LangGraph 很适合多阶段内容处理。这里有一个 password 示例。",
         "warnings": [],
     }
 
-    # invoke() runs the graph from START to END and returns the final state.
+    # invoke() 会让图从 START 跑到 END，并返回最终状态。
     final_state = app.invoke(initial_state)
 
     print("=== Review Status ===")

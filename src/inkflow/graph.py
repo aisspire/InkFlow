@@ -1,12 +1,12 @@
-"""Minimal LangGraph workflow for InkFlow.
+"""InkFlow 的最小 LangGraph 工作流。
 
-This file intentionally keeps the graph small:
+这个文件会刻意保持简单，只包含三个节点：
 
-1. preprocess_node: clean input text.
-2. draft_node: create a placeholder draft.
-3. review_node: mark the result as waiting for human review.
+1. preprocess_node：清洗输入文本。
+2. draft_node：生成一个占位草稿。
+3. review_node：把结果标记为等待人工审核。
 
-Later steps can replace each placeholder with real LLM, RAG, and review logic.
+后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -15,23 +15,23 @@ from inkflow.state import InkFlowState
 
 
 def preprocess_node(state: InkFlowState) -> dict:
-    """Clean the original input before drafting.
+    """在生成草稿前清洗原始输入。
 
-    A LangGraph node is just a Python function.
-    It receives the current state and returns the fields it wants to update.
+    LangGraph 的节点本质上就是一个 Python 函数。
+    它接收当前状态，然后返回自己想更新的字段。
     """
 
     raw_text = state["raw_text"]
     warnings = list(state.get("warnings", []))
 
-    # Keep the first version simple: trim whitespace and normalize empty input.
+    # 第一版先保持简单：去掉首尾空白，并处理空输入。
     clean_text = raw_text.strip()
     if not clean_text:
         warnings.append("输入内容为空，后续草稿只能生成占位内容。")
         clean_text = "（空输入）"
 
-    # A tiny example of sensitive information masking.
-    # Later this can become a dedicated rule list or regex module.
+    # 这里先放一个很小的敏感信息替换示例。
+    # 后续可以把它升级成独立的规则列表或正则模块。
     clean_text = clean_text.replace("密码", "***")
     clean_text = clean_text.replace("password", "***")
 
@@ -42,10 +42,10 @@ def preprocess_node(state: InkFlowState) -> dict:
 
 
 def draft_node(state: InkFlowState) -> dict:
-    """Create a first draft from cleaned text.
+    """根据清洗后的文本生成第一版草稿。
 
-    This node does not call an LLM yet. For learning LangGraph, it is better
-    to first understand the graph shape, then plug real model calls into nodes.
+    这个节点暂时不调用 LLM。学习 LangGraph 时，先理解图的形状，
+    再把真实模型调用接进节点里，会更容易掌握。
     """
 
     clean_text = state["clean_text"]
@@ -62,7 +62,7 @@ def draft_node(state: InkFlowState) -> dict:
 
 
 def review_node(state: InkFlowState) -> dict:
-    """Mark the workflow as waiting for human review.
+    """把工作流标记为等待人工审核。
 
     README 里设计了人工审核节点。这里先只用一个状态字段表达：
     程序已经生成草稿，但还没有自动发布。
@@ -72,20 +72,20 @@ def review_node(state: InkFlowState) -> dict:
 
 
 def build_graph():
-    """Build and compile the LangGraph workflow.
+    """构建并编译 LangGraph 工作流。
 
-    StateGraph describes the workflow structure.
-    compile() turns that structure into something we can invoke.
+    StateGraph 用来描述工作流结构。
+    compile() 会把这个结构变成可以 invoke() 执行的应用。
     """
 
     graph = StateGraph(InkFlowState)
 
-    # Register each Python function as a named graph node.
+    # 把每个 Python 函数注册成一个带名字的图节点。
     graph.add_node("preprocess", preprocess_node)
     graph.add_node("draft", draft_node)
     graph.add_node("review", review_node)
 
-    # Define the route through the graph.
+    # 定义状态在图里的流转路线。
     graph.add_edge(START, "preprocess")
     graph.add_edge("preprocess", "draft")
     graph.add_edge("draft", "review")

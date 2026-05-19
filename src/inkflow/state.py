@@ -1,35 +1,35 @@
-"""Shared state definition for the InkFlow LangGraph workflow.
+"""InkFlow LangGraph 工作流的共享状态定义。
 
-LangGraph passes one shared "state" object between nodes.
-For a beginner-friendly first version, we use a TypedDict:
+LangGraph 会在节点之间传递同一个“状态”对象。
+为了让第一版更适合学习，这里使用 TypedDict：
 
-- It behaves like a normal Python dictionary at runtime.
-- It also tells editors/type checkers what keys we expect.
-- Each graph node can read existing keys and return updated keys.
+- 运行时它像普通 Python 字典一样使用。
+- 编辑器和类型检查工具可以知道我们期望有哪些字段。
+- 每个图节点都可以读取已有字段，并返回自己要更新的字段。
 """
 
 from typing import NotRequired, TypedDict
 
 
 class InkFlowState(TypedDict):
-    """State shared by every node in the workflow.
+    """工作流中每个节点共享的状态。
 
-    Think of this as the "work order" moving through the factory:
-    each node reads the current values, adds or changes a few fields,
-    then passes the state to the next node.
+    可以把它想成在流程里流转的“工单”：
+    每个节点读取当前值，添加或修改少量字段，
+    然后把状态继续交给下一个节点。
     """
 
-    # Original text from the user, a local note, RSS item, GitHub release, etc.
+    # 原始输入文本，未来可以来自用户、本地笔记、RSS 条目或 GitHub Release。
     raw_text: str
 
-    # Text after basic cleanup and simple sensitive-word replacement.
+    # 经过基础清洗和简单敏感词替换后的文本。
     clean_text: NotRequired[str]
 
-    # Draft article content. In this first version it is only placeholder text.
+    # 文章草稿内容。第一版先用占位文本模拟，暂时不接入 LLM。
     draft: NotRequired[str]
 
-    # Current review status. Later this can drive human-in-the-loop branching.
+    # 当前审核状态。后续可以用它驱动“人工介入”分支。
     review_status: NotRequired[str]
 
-    # Non-fatal notes collected during the workflow.
+    # 流程中收集的非致命提示信息。
     warnings: NotRequired[list[str]]
