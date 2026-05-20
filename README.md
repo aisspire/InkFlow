@@ -11,6 +11,10 @@ $env:PYTHONPATH = "src"
 python -m inkflow.main
 ```
 
+注意：这个项目采用 `src` 目录布局。请在项目根目录用 `python -m inkflow.main`
+按“模块”方式启动，不要直接运行 `src/inkflow/main.py`。直接运行文件时，
+Python 只会把 `src/inkflow` 当作搜索路径，因此找不到顶层包 `inkflow`。
+
 默认会读取项目根目录下的 `config.toml`：
 
 ```toml
