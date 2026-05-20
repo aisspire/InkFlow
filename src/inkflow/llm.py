@@ -124,48 +124,6 @@ def is_llm_enabled(config_path: Path = DEFAULT_LLM_CONFIG_PATH) -> bool:
     return load_llm_config(config_path).enabled
 
 
-def generate_draft(
-    clean_text: str,
-    *,
-    config_path: Path = DEFAULT_LLM_CONFIG_PATH,
-) -> str:
-    """根据清洗后的输入文本生成 Markdown 草稿。
-
-    这是面向 InkFlow 业务语义的函数：
-    - graph.py 只需要知道“我要生成草稿”
-    - prompt 组织和底层模型调用都留在 LLM 模块里
-    """
-
-    config = load_llm_config(config_path)
-    if not config.enabled:
-        raise LLMConfigError("LLM 当前未启用，请在 llm.toml 中设置 enabled = true。")
-
-    messages: list[LLMMessage] = [
-        {
-            "role": "system",
-            "content": (
-                "你是 InkFlow 的内容草稿助手。"
-                "请根据用户提供的输入，生成结构清晰的 Markdown 草稿。"
-                "输出需要适合后续人工审核，不要声称已经发布。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "请根据下面的输入内容生成一份 Markdown 草稿，包含：\n"
-                "1. 标题\n"
-                "2. 摘要\n"
-                "3. 大纲\n"
-                "4. 正文草稿\n"
-                "5. 后续人工可补充的要点\n\n"
-                f"输入内容：\n{clean_text}"
-            ),
-        },
-    ]
-
-    return call_llm(messages, config=config)
-
-
 def call_llm(
     messages: Sequence[LLMMessage],
     *,
