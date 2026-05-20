@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from inkflow.graph import build_graph
+from inkflow.graphs import build_graph
 from inkflow.state import InkFlowState
 
 

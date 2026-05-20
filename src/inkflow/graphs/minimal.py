@@ -11,7 +11,7 @@
 
 from langgraph.graph import END, START, StateGraph
 
-from inkflow.draft import build_placeholder_draft, generate_draft
+from inkflow.services.draft import build_placeholder_draft, generate_draft
 from inkflow.state import InkFlowState
 
 
