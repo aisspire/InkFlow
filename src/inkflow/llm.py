@@ -53,6 +53,7 @@ class LLMConfig:
     外部代码也可以继续依赖这个稳定结构。
     """
 
+    enabled: bool
     provider: str
     model: str
     api_key_env: str
@@ -82,6 +83,7 @@ def load_llm_config(config_path: Path = DEFAULT_LLM_CONFIG_PATH) -> LLMConfig:
     if not isinstance(llm_section, dict):
         raise LLMConfigError("LLM 配置文件必须包含 [llm] 配置段。")
 
+    enabled = _optional_bool(llm_section, "enabled", default=False)
     provider = _required_string(llm_section, "provider")
     model = _required_string(llm_section, "model")
     api_key_env = _required_string(llm_section, "api_key_env")
@@ -98,6 +100,7 @@ def load_llm_config(config_path: Path = DEFAULT_LLM_CONFIG_PATH) -> LLMConfig:
     max_tokens = _optional_positive_int(llm_section, "max_tokens")
 
     return LLMConfig(
+        enabled=enabled,
         provider=provider,
         model=model,
         api_key_env=api_key_env,
@@ -106,6 +109,61 @@ def load_llm_config(config_path: Path = DEFAULT_LLM_CONFIG_PATH) -> LLMConfig:
         timeout_seconds=timeout_seconds,
         max_tokens=max_tokens,
     )
+
+
+def is_llm_enabled(config_path: Path = DEFAULT_LLM_CONFIG_PATH) -> bool:
+    """判断当前配置是否启用真实 LLM。
+
+    这个函数只读取配置，不会创建客户端，也不会触发网络请求。
+    LangGraph 节点可以先用它决定是否走真实模型分支。
+    """
+
+    if not config_path.exists():
+        return False
+
+    return load_llm_config(config_path).enabled
+
+
+def generate_draft(
+    clean_text: str,
+    *,
+    config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+) -> str:
+    """根据清洗后的输入文本生成 Markdown 草稿。
+
+    这是面向 InkFlow 业务语义的函数：
+    - graph.py 只需要知道“我要生成草稿”
+    - prompt 组织和底层模型调用都留在 LLM 模块里
+    """
+
+    config = load_llm_config(config_path)
+    if not config.enabled:
+        raise LLMConfigError("LLM 当前未启用，请在 llm.toml 中设置 enabled = true。")
+
+    messages: list[LLMMessage] = [
+        {
+            "role": "system",
+            "content": (
+                "你是 InkFlow 的内容草稿助手。"
+                "请根据用户提供的输入，生成结构清晰的 Markdown 草稿。"
+                "输出需要适合后续人工审核，不要声称已经发布。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请根据下面的输入内容生成一份 Markdown 草稿，包含：\n"
+                "1. 标题\n"
+                "2. 摘要\n"
+                "3. 大纲\n"
+                "4. 正文草稿\n"
+                "5. 后续人工可补充的要点\n\n"
+                f"输入内容：\n{clean_text}"
+            ),
+        },
+    ]
+
+    return call_llm(messages, config=config)
 
 
 def call_llm(
@@ -196,6 +254,15 @@ def _optional_string(section: dict, key: str) -> str | None:
 
     stripped_value = value.strip()
     return stripped_value or None
+
+
+def _optional_bool(section: dict, key: str, *, default: bool) -> bool:
+    """读取可选布尔配置。"""
+
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise LLMConfigError(f"LLM 配置项 {key!r} 必须是布尔值。")
+    return value
 
 
 def _optional_number(section: dict, key: str, *, default: float) -> float:

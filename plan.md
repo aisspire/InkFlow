@@ -7,6 +7,6 @@
 - [ ] 改造草稿节点：让 `draft_node` 根据 `outline` 生成草稿。
 - [ ] 增加审核报告：增加 `review_report`，记录空内容、敏感词、人工审核状态等信息。
 - [ ] 学习条件边：根据审核结果决定继续、返回修改或结束流程。
-- [ ] 接入真实 LLM：先只接入一个节点，例如 `outline_node` 或 `draft_node`。
+- [x] 接入真实 LLM：先只接入一个节点，例如 `outline_node` 或 `draft_node`。
 - [ ] 引入 RAG 检索：增加历史文章检索节点，例如 `retrieve_history_node`。
 - [ ] 增加人工审核入口：先使用终端确认，再考虑 Web UI。

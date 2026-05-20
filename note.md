@@ -101,3 +101,27 @@
 
 
 ### 配置要留出拓展的空间
+
+
+
+## 依赖
+
+| 层级           | 代表依赖                        | 作用                           |
+| :------------- | :------------------------------ | :----------------------------- |
+| 模型 SDK       | openai、anthropic、google-genai | 直接调用模型 API               |
+| LLM 抽象框架   | langchain、langchain-openai     | 统一不同模型的调用接口         |
+| 编排框架       | langgraph                       | 管理多节点工作流状态           |
+| Web API 框架   | fastapi、uvicorn                | 把能力暴露成 HTTP 服务         |
+| RAG/知识库框架 | llama-index、向量库             | 文档检索、知识增强             |
+| LLM 网关       | litellm                         | 多模型路由、统一接口、成本统计 |
+| 配置/环境变量  | tomllib、python-dotenv          | 读取配置、加载密钥             |
+
+
+
+
+
+## LLM使用
+
+设置开关
+
+提示词放置在llm中
