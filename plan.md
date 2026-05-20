@@ -1,6 +1,6 @@
 # InkFlow 后续学习计划
 
-- [ ] 读取本地 Markdown：让 `main.py` 不再写死示例文本，改为读取本地 `.md` 文件。
+- [x] 读取本地 Markdown：让 `main.py` 不再写死示例文本，改为读取本地 `.md` 文件。
 - [ ] 拆出预处理模块：把清洗、脱敏逻辑从 `graph.py` 挪到独立模块。
 - [ ] 新增大纲节点：增加 `outline_node`，流程变为 `preprocess -> outline -> draft -> review`。
 - [ ] 扩展 state 字段：增加 `outline`，理解什么时候需要给 state 增加字段。

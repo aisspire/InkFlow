@@ -1,0 +1,39 @@
+# InkFlow LLM 配置示例
+#
+# 使用方式：
+# 1. 复制本文件为 llm.toml
+# 2. 按你的模型服务修改下面的 model、base_url、api_key_env
+# 3. 在系统环境变量中设置 api_key_env 指向的密钥
+#
+# 注意：llm.toml 已被 .gitignore 忽略，不要提交真实密钥或私有配置。
+
+[llm]
+# 当前第一版只实现 OpenAI-compatible 调用。
+# 很多云端服务和本地服务都支持这种接口形态。
+provider = "openai-compatible"
+
+# 模型名称由具体服务商决定。
+# OpenAI 官方示例可以使用 "gpt-4.1-mini"。
+# DeepSeek、OpenRouter、本地模型等需要填写各自的模型名。
+model = "gpt-4.1-mini"
+
+# OpenAI 官方接口可以省略 base_url，使用 SDK 默认地址。
+# 其它 OpenAI-compatible 服务通常需要填写自己的 /v1 地址。
+# 示例：
+# base_url = "https://api.openai.com/v1"
+# base_url = "https://api.deepseek.com/v1"
+base_url = ""
+
+# 不把密钥写进 TOML，只写“环境变量名称”。
+# 真实密钥请在系统环境变量中设置，例如 OPENAI_API_KEY。
+api_key_env = "OPENAI_API_KEY"
+
+# 生成随机性。越低越稳定，越高越发散。
+temperature = 0.7
+
+# 单次请求超时时间，单位：秒。
+timeout_seconds = 30
+
+# 可选：限制模型最多生成多少 token。
+# 设为 0 表示不主动传这个限制，交给模型服务默认处理。
+max_tokens = 0
