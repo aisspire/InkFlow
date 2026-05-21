@@ -1,17 +1,20 @@
 """InkFlow 的最小 LangGraph 工作流。
 
-这个文件会刻意保持简单，只包含三个节点：
+这个文件会刻意保持简单，当前包含四个节点：
 
 1. preprocess_node：清洗输入文本。
-2. draft_node：生成一个占位草稿。
-3. review_node：把结果标记为等待人工审核。
+2. redaction_plan_node：生成脱敏审查方案。
+3. draft_node：生成一个占位草稿。
+4. review_node：把结果标记为等待人工审核。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
 
 from langgraph.graph import END, START, StateGraph
 
+from inkflow.services.audit import append_audit_event
 from inkflow.services.draft import build_placeholder_draft, generate_draft
+from inkflow.services.redaction import generate_redaction_findings
 from inkflow.state import InkFlowState
 
 
@@ -65,6 +68,31 @@ def draft_node(state: InkFlowState) -> dict:
     }
 
 
+def redaction_plan_node(state: InkFlowState) -> dict:
+    """生成脱敏审查方案。
+
+    这个节点先不做终端交互，只把 LLM 发现的敏感项写入状态。
+    后续 Task 4 会新增人工逐条确认节点，再决定是否真的执行脱敏。
+    """
+
+    text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
+    findings = generate_redaction_findings(text)
+
+    # 先把 findings 打印出来，方便当前阶段手动观察 LLM 或本地降级结果。
+    print("=== Redaction Findings ===")
+    print(findings)
+
+    return {
+        "redaction_findings": findings,
+        "audit_events": append_audit_event(
+            state.get("audit_events"),
+            "redaction_plan",
+            "llm_findings",
+            {"findings": findings},
+        ),
+    }
+
+
 def review_node(state: InkFlowState) -> dict:
     """把工作流标记为等待人工审核。
 
@@ -86,12 +114,14 @@ def build_graph():
 
     # 把每个 Python 函数注册成一个带名字的图节点。
     graph.add_node("preprocess", preprocess_node)
+    graph.add_node("redaction_plan", redaction_plan_node)
     graph.add_node("draft", draft_node)
     graph.add_node("review", review_node)
 
     # 定义状态在图里的流转路线。
     graph.add_edge(START, "preprocess")
-    graph.add_edge("preprocess", "draft")
+    graph.add_edge("preprocess", "redaction_plan")
+    graph.add_edge("redaction_plan", "draft")
     graph.add_edge("draft", "review")
     graph.add_edge("review", END)
 

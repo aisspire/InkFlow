@@ -3,6 +3,6 @@
 外部模块优先从这里导入状态类型，避免关心状态文件的内部拆分方式。
 """
 
-from inkflow.state.workflow import InkFlowState
+from inkflow.state.workflow import ArticleData, InkFlowState, RedactionDecision, RedactionFinding
 
-__all__ = ["InkFlowState"]
+__all__ = ["ArticleData", "InkFlowState", "RedactionDecision", "RedactionFinding"]

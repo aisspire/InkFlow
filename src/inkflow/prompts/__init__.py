@@ -5,5 +5,6 @@
 """
 
 from inkflow.prompts.draft import build_draft_messages
+from inkflow.prompts.redaction import build_redaction_messages
 
-__all__ = ["build_draft_messages"]
+__all__ = ["build_draft_messages", "build_redaction_messages"]
