@@ -6,13 +6,20 @@ LangGraph 节点只关心“给我一段文本，返回敏感项列表”。
 
 from __future__ import annotations
 
+import difflib
 import json
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from inkflow.llm import DEFAULT_LLM_CONFIG_PATH, call_llm, is_llm_enabled, load_llm_config
+from inkflow.llm import (
+    DEFAULT_LLM_CONFIG_PATH,
+    LLMMessage,
+    call_llm,
+    is_llm_enabled,
+    load_llm_config,
+)
 from inkflow.prompts import build_redaction_messages
-from inkflow.state import RedactionFinding
+from inkflow.state import RedactionDecision, RedactionFinding
 
 
 def add_line_numbers(text: str) -> str:
@@ -58,6 +65,89 @@ def generate_redaction_findings(
         findings.append(_normalize_finding(raw_finding, index))
 
     return findings
+
+
+def apply_redaction_with_llm(
+    text: str,
+    decisions: list[RedactionDecision],
+    extra_instruction: str = "",
+    *,
+    config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+) -> str:
+    """根据用户确认的修改方案，让 LLM 返回修改后的完整文本。
+
+    这个函数只处理“已经被用户确认要修改”的条目。
+    如果没有 decisions，就直接返回原文，避免模型进行额外发挥。
+    """
+
+    if not decisions:
+        return text
+
+    if not is_llm_enabled(config_path):
+        raise RuntimeError("LLM 未启用，无法执行需要模型改写的脱敏决策。")
+
+    config = load_llm_config(config_path)
+    return call_llm(
+        _build_apply_redaction_messages(text, decisions, extra_instruction),
+        config=config,
+    ).strip()
+
+
+def build_text_diff(before: str, after: str) -> str:
+    """生成 unified diff，供用户确认脱敏修改是否符合预期。"""
+
+    return "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile="before",
+            tofile="after",
+            lineterm="",
+        )
+    )
+
+
+def _build_apply_redaction_messages(
+    text: str,
+    decisions: list[RedactionDecision],
+    extra_instruction: str,
+) -> list[LLMMessage]:
+    """组装“按用户决策执行脱敏”的 LLM messages。"""
+
+    decisions_text = json.dumps(decisions, ensure_ascii=False, indent=2)
+    extra_text = extra_instruction.strip() or "无"
+
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是 InkFlow 的内容脱敏改写助手。"
+                "你只能按照用户已经确认的 decisions 修改文本，不能新增其它改写。"
+                "请尽量保留原文结构、段落顺序、语气和 Markdown 格式。"
+                "只返回修改后的完整正文，不要返回解释、标题、代码块或 diff。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"""请根据下方 decisions 对原文执行脱敏改写。
+
+要求：
+- 只修改 decisions 覆盖的内容。
+- 对每条 decision 使用 user_instruction 作为最终处理方案。
+- 保留原文其它内容不变。
+- 返回完整修改后文本。
+
+decisions:
+{decisions_text}
+
+额外重试建议:
+{extra_text}
+
+原文:
+{text}
+""",
+        },
+    ]
 
 
 def _parse_json_array(response_text: str) -> list[Any]:

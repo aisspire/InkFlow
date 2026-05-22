@@ -5,8 +5,9 @@
 1. preprocess_node：清洗输入文本。
 2. redaction_plan_node：生成脱敏审查方案。
 3. redaction_review_node：让用户逐条确认脱敏方案。
-4. draft_node：生成一个占位草稿。
-5. review_node：把结果标记为等待人工审核。
+4. apply_redaction_node：执行用户确认的脱敏修改并展示 diff。
+5. draft_node：生成一个占位草稿。
+6. review_node：把结果标记为等待人工审核。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
@@ -14,9 +15,13 @@
 from langgraph.graph import END, START, StateGraph
 
 from inkflow.services.audit import append_audit_event
-from inkflow.services.console_review import review_redaction_findings
+from inkflow.services.console_review import confirm_redaction_diff, review_redaction_findings
 from inkflow.services.draft import build_placeholder_draft, generate_draft
-from inkflow.services.redaction import generate_redaction_findings
+from inkflow.services.redaction import (
+    apply_redaction_with_llm,
+    build_text_diff,
+    generate_redaction_findings,
+)
 from inkflow.state import InkFlowState
 
 
@@ -55,7 +60,9 @@ def draft_node(state: InkFlowState) -> dict:
     这些业务细节交给 draft.py 处理。
     """
 
-    clean_text = state["clean_text"]
+    # 如果前面已经完成脱敏，后续草稿必须优先使用 redacted_text，
+    # 避免复查通过后又把原始 clean_text 带入生成阶段。
+    clean_text = state.get("redacted_text") or state["clean_text"]
     warnings = list(state.get("warnings", []))
 
     try:
@@ -125,14 +132,83 @@ def redaction_review_node(state: InkFlowState) -> dict:
 def route_after_redaction_review(state: InkFlowState) -> str:
     """根据人工审查结果决定是否继续生成草稿。
 
-    Task 5 会新增真正的 apply_redaction 节点；在它接入前，
-    如果已经有需要执行的脱敏决策，先停在 pending_redaction，
-    避免未脱敏文本继续进入草稿生成。
+    如果有需要执行的脱敏决策，就进入 apply_redaction 节点；
+    如果用户停止，则直接结束；如果没有要处理的敏感项，则继续生成草稿。
     """
 
-    if state.get("review_status") in {"stopped_by_user", "pending_redaction"}:
+    if state.get("review_status") == "stopped_by_user":
         return "stop"
+    if state.get("review_status") == "pending_redaction":
+        return "apply_redaction"
     return "draft"
+
+
+def apply_redaction_node(state: InkFlowState) -> dict:
+    """执行用户确认的脱敏修改，并让用户确认 diff。
+
+    这个节点内部允许多次重试：用户不满意本次 diff 时，可以输入额外建议，
+    节点会把建议传给 LLM 再改一次。用户确认后，图会回到 redaction_plan 复查。
+    """
+
+    source_text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
+    decisions = state.get("redaction_decisions", [])
+    audit_events = state.get("audit_events")
+    warnings = list(state.get("warnings", []))
+    extra_instruction = ""
+
+    while True:
+        try:
+            next_text = apply_redaction_with_llm(
+                source_text,
+                decisions,
+                extra_instruction=extra_instruction,
+            )
+        except Exception as error:
+            warnings.append(f"脱敏执行失败，流程已停止等待人工处理：{error}")
+            return {
+                "review_status": "redaction_apply_failed",
+                "warnings": warnings,
+                "audit_events": append_audit_event(
+                    audit_events,
+                    "apply_redaction",
+                    "llm_apply_failed",
+                    {"error": str(error), "decisions": decisions},
+                ),
+            }
+
+        diff = build_text_diff(source_text, next_text)
+        action, user_note = confirm_redaction_diff(diff)
+
+        audit_events = append_audit_event(
+            audit_events,
+            "apply_redaction",
+            "user_diff_decision",
+            {"action": action, "user_note": user_note, "diff": diff},
+        )
+
+        if action == "accept":
+            return {
+                "redacted_text": next_text,
+                "redaction_diff": diff,
+                "review_status": "redaction_applied",
+                "audit_events": audit_events,
+            }
+
+        if action == "stop":
+            return {
+                "review_status": "stopped_by_user",
+                "audit_events": audit_events,
+            }
+
+        extra_instruction = user_note or "用户不接受本次 diff，请重新按原始决策改写。"
+
+
+def route_after_apply_redaction(state: InkFlowState) -> str:
+    """脱敏执行后决定是复查还是结束。"""
+
+    if state.get("review_status") == "redaction_applied":
+        return "recheck"
+    return "stop"
 
 
 def review_node(state: InkFlowState) -> dict:
@@ -158,6 +234,7 @@ def build_graph():
     graph.add_node("preprocess", preprocess_node)
     graph.add_node("redaction_plan", redaction_plan_node)
     graph.add_node("redaction_review", redaction_review_node)
+    graph.add_node("apply_redaction", apply_redaction_node)
     graph.add_node("draft", draft_node)
     graph.add_node("review", review_node)
 
@@ -170,7 +247,16 @@ def build_graph():
         route_after_redaction_review,
         {
             "stop": END,
+            "apply_redaction": "apply_redaction",
             "draft": "draft",
+        },
+    )
+    graph.add_conditional_edges(
+        "apply_redaction",
+        route_after_apply_redaction,
+        {
+            "recheck": "redaction_plan",
+            "stop": END,
         },
     )
     graph.add_edge("draft", "review")

@@ -81,6 +81,37 @@ def _confirm_continue(
         print("请输入 y 或 s。")
 
 
+def confirm_redaction_diff(diff: str) -> tuple[str, str]:
+    """展示脱敏 diff，并让用户决定接受、重试或停止。
+
+    返回值：
+    - ("accept", "")：用户确认本次修改。
+    - ("retry", "")：用户不接受，但没有补充说明。
+    - ("retry", "补充说明")：用户给出额外修改建议。
+    - ("stop", "")：用户停止流程。
+    """
+
+    print("=== Redaction Diff ===")
+    if diff:
+        print(diff)
+    else:
+        print("本次改写没有产生文本差异。")
+
+    print("输入 y 确认修改，输入 n 重新尝试，输入 s 停止，或输入额外建议后重新修改。")
+    while True:
+        user_input = _read_user_input("你的选择：")
+        lowered_input = user_input.lower()
+        if lowered_input == "y":
+            return "accept", ""
+        if lowered_input == "n":
+            return "retry", ""
+        if lowered_input == "s":
+            return "stop", ""
+        if user_input:
+            return "retry", user_input
+        print("请输入 y、n、s，或直接写下额外建议。")
+
+
 def _read_user_input(prompt: str) -> str:
     """读取终端输入，并兼容 Windows PowerShell 管道开头可能出现的 BOM。
 
