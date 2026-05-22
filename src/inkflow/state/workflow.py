@@ -73,6 +73,9 @@ class InkFlowState(TypedDict):
     # 输入文件路径，后续报告会用它追踪本次流程来自哪份笔记。
     source_path: NotRequired[str]
 
+    # 命令行入口读到的配置。节点通过它获取 reviews 等本地目录。
+    config: NotRequired[dict[str, Any]]
+
     # 经过基础清洗和简单敏感词替换后的文本。
     clean_text: NotRequired[str]
 
@@ -84,8 +87,10 @@ class InkFlowState(TypedDict):
 
     # 文章生成和 Astro Markdown 打包阶段的数据。
     article_data: NotRequired[ArticleData]
+    article_feedback: NotRequired[str]
     final_document: NotRequired[str]
     review_path: NotRequired[str]
+    review_action: NotRequired[str]
     approved: NotRequired[bool]
 
     # 发布阶段和报告阶段的数据。

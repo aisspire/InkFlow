@@ -46,7 +46,12 @@ def load_config(config_path: Path) -> dict[str, Any]:
         return {}
 
     with config_path.open("rb") as config_file:
-        return tomllib.load(config_file)
+        config = tomllib.load(config_file)
+
+    # 图节点需要按配置文件所在目录解析 reviews 等相对路径。
+    # 这里把目录放进状态，避免节点自己重新读配置文件。
+    config["_config_dir"] = str(config_path.parent)
+    return config
 
 
 def resolve_input_path(args: argparse.Namespace, config: dict[str, Any]) -> Path | None:
@@ -93,6 +98,8 @@ def main() -> None:
     # }
     initial_state: InkFlowState = {
         "raw_text": raw_text,
+        "source_path": str(input_path) if input_path is not None else "",
+        "config": config,
         "warnings": [],
     }
 
@@ -103,11 +110,20 @@ def main() -> None:
     print(final_state["review_status"])
     print()
 
-    print("=== Draft ===")
-    if "draft" in final_state:
+    print("=== Final Document ===")
+    if "final_document" in final_state:
+        print(final_state["final_document"])
+    elif "draft" in final_state:
         print(final_state["draft"])
     else:
-        print("流程已在生成草稿前停止，未生成草稿。")
+        print("流程已在生成文章前停止，未生成文档。")
+    print()
+
+    print("=== Review Path ===")
+    if "review_path" in final_state:
+        print(final_state["review_path"])
+    else:
+        print("未生成审阅文件。")
     print()
 
     print("=== Warnings ===")

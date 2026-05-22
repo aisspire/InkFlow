@@ -8,10 +8,12 @@
 4. apply_redaction_node：执行用户确认的脱敏修改并展示 diff。
 5. article_generation_node：生成结构化文章 JSON。
 6. package_node：拼装 Astro Markdown。
-7. review_node：把结果标记为等待人工审核。
+7. write_review_node：写入本地审阅稿并收集用户选择。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
+
+from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
@@ -25,6 +27,7 @@ from inkflow.services.redaction import (
     build_text_diff,
     generate_redaction_findings,
 )
+from inkflow.services.review_output import review_generated_draft, write_review_file
 from inkflow.state import InkFlowState
 
 
@@ -224,9 +227,13 @@ def article_generation_node(state: InkFlowState) -> dict:
     text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
     warnings = list(state.get("warnings", []))
     audit_events = state.get("audit_events")
+    extra_instruction = state.get("article_feedback", "")
 
     try:
-        article_data, qa_history = generate_article_data(text)
+        article_data, qa_history = generate_article_data(
+            text,
+            extra_instruction=extra_instruction,
+        )
     except Exception as error:
         warnings.append(f"文章 JSON 生成失败，已降级为本地占位文章：{error}")
         article_data = build_placeholder_article(text)
@@ -239,11 +246,13 @@ def article_generation_node(state: InkFlowState) -> dict:
         {
             "article_data": article_data,
             "qa_history": qa_history,
+            "extra_instruction": extra_instruction,
         },
     )
 
     return {
         "article_data": article_data,
+        "article_feedback": "",
         "audit_events": audit_events,
         "warnings": warnings,
     }
@@ -273,14 +282,81 @@ def package_node(state: InkFlowState) -> dict:
     }
 
 
-def review_node(state: InkFlowState) -> dict:
-    """把工作流标记为等待人工审核。
+def write_review_node(state: InkFlowState) -> dict:
+    """写入本地审阅稿，并根据用户选择决定下一段流转。
 
-    README 里设计了人工审核节点。这里先只用一个状态字段表达：
-    程序已经拼装出 Astro Markdown，但还没有自动发布。
+    Task 8 只负责“生成审阅稿”和“人工决定下一步”。
+    用户接受后先停在 accepted_for_publish，真正发布节点会在 Task 9 接上。
     """
 
-    return {"review_status": "pending_human_review"}
+    article_data = state["article_data"]
+    final_document = state["final_document"]
+    review_dir = _resolve_review_dir(state.get("config", {}))
+    review_path = write_review_file(final_document, article_data["title"], review_dir)
+    action, feedback = review_generated_draft(review_path)
+
+    approved = action == "accepted"
+    if action == "accepted":
+        review_status = "accepted_for_publish"
+    elif action == "redact_again":
+        review_status = "review_returned_to_redaction"
+    elif action == "regenerate":
+        review_status = "review_returned_to_generation"
+    else:
+        review_status = "stopped_by_user"
+
+    return {
+        "review_path": str(review_path),
+        "review_action": action,
+        "article_feedback": feedback,
+        "approved": approved,
+        "review_status": review_status,
+        "audit_events": append_audit_event(
+            state.get("audit_events"),
+            "write_review",
+            "user_review_action",
+            {
+                "review_path": str(review_path),
+                "action": action,
+                "feedback": feedback,
+            },
+        ),
+    }
+
+
+def route_after_write_review(state: InkFlowState) -> str:
+    """根据审阅选择决定回到哪一个节点。
+
+    accepted 目前先结束，Task 9 会把它接到发布节点；
+    regenerate 会携带 article_feedback 回到文章生成节点；
+    redact_again 会回到脱敏方案节点重新审查。
+    """
+
+    action = state.get("review_action")
+    if action == "redact_again":
+        return "redact_again"
+    if action == "regenerate":
+        return "regenerate"
+    return "stop"
+
+
+def _resolve_review_dir(config: dict) -> Path:
+    """从配置中解析审阅稿目录。
+
+    config.toml 里的相对路径以配置文件所在目录为基准。
+    main.py 会把这个目录写入 _config_dir，避免节点重新读取配置文件。
+    """
+
+    review_config = config.get("review", {})
+    if not isinstance(review_config, dict):
+        review_config = {}
+
+    review_dir = Path(str(review_config.get("dir", "reviews")))
+    if review_dir.is_absolute():
+        return review_dir
+
+    config_dir = Path(str(config.get("_config_dir", ".")))
+    return config_dir / review_dir
 
 
 def build_graph():
@@ -300,7 +376,7 @@ def build_graph():
     graph.add_node("article_generation", article_generation_node)
     graph.add_node("package", package_node)
     graph.add_node("draft", draft_node)
-    graph.add_node("review", review_node)
+    graph.add_node("write_review", write_review_node)
 
     # 定义状态在图里的流转路线。
     graph.add_edge(START, "preprocess")
@@ -324,7 +400,15 @@ def build_graph():
         },
     )
     graph.add_edge("article_generation", "package")
-    graph.add_edge("package", "review")
-    graph.add_edge("review", END)
+    graph.add_edge("package", "write_review")
+    graph.add_conditional_edges(
+        "write_review",
+        route_after_write_review,
+        {
+            "redact_again": "redaction_plan",
+            "regenerate": "article_generation",
+            "stop": END,
+        },
+    )
 
     return graph.compile()

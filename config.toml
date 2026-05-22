@@ -1,3 +1,6 @@
 # InkFlow 的第一版本地输入配置。
 # 相对路径会按这个配置文件所在目录解析。
 input_path = "note.md"
+
+[review]
+dir = "reviews"
