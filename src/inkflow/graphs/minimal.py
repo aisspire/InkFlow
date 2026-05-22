@@ -4,8 +4,9 @@
 
 1. preprocess_node：清洗输入文本。
 2. redaction_plan_node：生成脱敏审查方案。
-3. draft_node：生成一个占位草稿。
-4. review_node：把结果标记为等待人工审核。
+3. redaction_review_node：让用户逐条确认脱敏方案。
+4. draft_node：生成一个占位草稿。
+5. review_node：把结果标记为等待人工审核。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
@@ -13,6 +14,7 @@
 from langgraph.graph import END, START, StateGraph
 
 from inkflow.services.audit import append_audit_event
+from inkflow.services.console_review import review_redaction_findings
 from inkflow.services.draft import build_placeholder_draft, generate_draft
 from inkflow.services.redaction import generate_redaction_findings
 from inkflow.state import InkFlowState
@@ -93,6 +95,46 @@ def redaction_plan_node(state: InkFlowState) -> dict:
     }
 
 
+def redaction_review_node(state: InkFlowState) -> dict:
+    """让用户在终端里逐条审查脱敏方案。
+
+    这个节点只收集用户决策，不直接改写原文。
+    真正的脱敏执行会在后续节点里根据 redaction_decisions 完成。
+    """
+
+    status, decisions = review_redaction_findings(state.get("redaction_findings", []))
+    if status == "stop":
+        review_status = "stopped_by_user"
+    elif decisions:
+        review_status = "pending_redaction"
+    else:
+        review_status = "redaction_reviewed"
+
+    return {
+        "review_status": review_status,
+        "redaction_decisions": decisions,
+        "audit_events": append_audit_event(
+            state.get("audit_events"),
+            "redaction_review",
+            "user_decisions",
+            {"status": review_status, "decisions": decisions},
+        ),
+    }
+
+
+def route_after_redaction_review(state: InkFlowState) -> str:
+    """根据人工审查结果决定是否继续生成草稿。
+
+    Task 5 会新增真正的 apply_redaction 节点；在它接入前，
+    如果已经有需要执行的脱敏决策，先停在 pending_redaction，
+    避免未脱敏文本继续进入草稿生成。
+    """
+
+    if state.get("review_status") in {"stopped_by_user", "pending_redaction"}:
+        return "stop"
+    return "draft"
+
+
 def review_node(state: InkFlowState) -> dict:
     """把工作流标记为等待人工审核。
 
@@ -115,13 +157,22 @@ def build_graph():
     # 把每个 Python 函数注册成一个带名字的图节点。
     graph.add_node("preprocess", preprocess_node)
     graph.add_node("redaction_plan", redaction_plan_node)
+    graph.add_node("redaction_review", redaction_review_node)
     graph.add_node("draft", draft_node)
     graph.add_node("review", review_node)
 
     # 定义状态在图里的流转路线。
     graph.add_edge(START, "preprocess")
     graph.add_edge("preprocess", "redaction_plan")
-    graph.add_edge("redaction_plan", "draft")
+    graph.add_edge("redaction_plan", "redaction_review")
+    graph.add_conditional_edges(
+        "redaction_review",
+        route_after_redaction_review,
+        {
+            "stop": END,
+            "draft": "draft",
+        },
+    )
     graph.add_edge("draft", "review")
     graph.add_edge("review", END)
 

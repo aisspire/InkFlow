@@ -104,12 +104,16 @@ def main() -> None:
     print()
 
     print("=== Draft ===")
-    print(final_state["draft"])
+    if "draft" in final_state:
+        print(final_state["draft"])
+    else:
+        print("流程已在生成草稿前停止，未生成草稿。")
     print()
 
     print("=== Warnings ===")
-    if final_state["warnings"]:
-        for warning in final_state["warnings"]:
+    warnings = final_state.get("warnings", [])
+    if warnings:
+        for warning in warnings:
             print(f"- {warning}")
     else:
         print("无")
