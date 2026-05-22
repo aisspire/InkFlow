@@ -6,7 +6,7 @@
 2. redaction_plan_node：生成脱敏审查方案。
 3. redaction_review_node：让用户逐条确认脱敏方案。
 4. apply_redaction_node：执行用户确认的脱敏修改并展示 diff。
-5. draft_node：生成一个占位草稿。
+5. article_generation_node：生成结构化文章 JSON。
 6. review_node：把结果标记为等待人工审核。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
@@ -15,6 +15,7 @@
 from langgraph.graph import END, START, StateGraph
 
 from inkflow.services.audit import append_audit_event
+from inkflow.services.article import build_placeholder_article, generate_article_data
 from inkflow.services.console_review import confirm_redaction_diff, review_redaction_findings
 from inkflow.services.draft import build_placeholder_draft, generate_draft
 from inkflow.services.redaction import (
@@ -130,17 +131,17 @@ def redaction_review_node(state: InkFlowState) -> dict:
 
 
 def route_after_redaction_review(state: InkFlowState) -> str:
-    """根据人工审查结果决定是否继续生成草稿。
+    """根据人工审查结果决定是否继续生成文章 JSON。
 
     如果有需要执行的脱敏决策，就进入 apply_redaction 节点；
-    如果用户停止，则直接结束；如果没有要处理的敏感项，则继续生成草稿。
+    如果用户停止，则直接结束；如果没有要处理的敏感项，则继续生成文章数据。
     """
 
     if state.get("review_status") == "stopped_by_user":
         return "stop"
     if state.get("review_status") == "pending_redaction":
         return "apply_redaction"
-    return "draft"
+    return "article_generation"
 
 
 def apply_redaction_node(state: InkFlowState) -> dict:
@@ -211,11 +212,46 @@ def route_after_apply_redaction(state: InkFlowState) -> str:
     return "stop"
 
 
+def article_generation_node(state: InkFlowState) -> dict:
+    """生成结构化文章 JSON。
+
+    这里优先使用 redacted_text，确保已经通过复查的脱敏文本进入写作阶段。
+    如果 LLM 不可用或返回异常，则降级成本地占位文章，方便继续验证后续节点。
+    """
+
+    text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
+    warnings = list(state.get("warnings", []))
+    audit_events = state.get("audit_events")
+
+    try:
+        article_data, qa_history = generate_article_data(text)
+    except Exception as error:
+        warnings.append(f"文章 JSON 生成失败，已降级为本地占位文章：{error}")
+        article_data = build_placeholder_article(text)
+        qa_history = []
+
+    audit_events = append_audit_event(
+        audit_events,
+        "article_generation",
+        "article_data_generated",
+        {
+            "article_data": article_data,
+            "qa_history": qa_history,
+        },
+    )
+
+    return {
+        "article_data": article_data,
+        "audit_events": audit_events,
+        "warnings": warnings,
+    }
+
+
 def review_node(state: InkFlowState) -> dict:
     """把工作流标记为等待人工审核。
 
     README 里设计了人工审核节点。这里先只用一个状态字段表达：
-    程序已经生成草稿，但还没有自动发布。
+    程序已经生成结构化文章数据，但还没有自动发布。
     """
 
     return {"review_status": "pending_human_review"}
@@ -235,6 +271,7 @@ def build_graph():
     graph.add_node("redaction_plan", redaction_plan_node)
     graph.add_node("redaction_review", redaction_review_node)
     graph.add_node("apply_redaction", apply_redaction_node)
+    graph.add_node("article_generation", article_generation_node)
     graph.add_node("draft", draft_node)
     graph.add_node("review", review_node)
 
@@ -248,7 +285,7 @@ def build_graph():
         {
             "stop": END,
             "apply_redaction": "apply_redaction",
-            "draft": "draft",
+            "article_generation": "article_generation",
         },
     )
     graph.add_conditional_edges(
@@ -259,7 +296,7 @@ def build_graph():
             "stop": END,
         },
     )
-    graph.add_edge("draft", "review")
+    graph.add_edge("article_generation", "review")
     graph.add_edge("review", END)
 
     return graph.compile()
