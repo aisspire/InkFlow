@@ -1,12 +1,13 @@
 """静态博客发布服务。
 
 本模块只执行程序配置好的固定命令序列：
-复制审阅稿 -> 构建检查 -> git add -> git commit -> git push。
+复制审阅稿 -> 可选构建检查 -> git add -> git commit -> git push。
 LLM 不参与命令生成，避免把发布动作变成不可控的自由工具调用。
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -53,9 +54,11 @@ def run_publish_command(command: list[str], cwd: Path) -> dict[str, object]:
     这样命令不会经过 shell 拼接，也就不会把配置字符串解释成任意脚本。
     """
 
+    executable_command = _resolve_executable_command(command)
+
     try:
         completed = subprocess.run(
-            command,
+            executable_command,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -65,7 +68,7 @@ def run_publish_command(command: list[str], cwd: Path) -> dict[str, object]:
         )
     except FileNotFoundError as error:
         return {
-            "command": command,
+            "command": executable_command,
             "cwd": str(cwd),
             "exit_code": 127,
             "stdout": "",
@@ -73,7 +76,7 @@ def run_publish_command(command: list[str], cwd: Path) -> dict[str, object]:
         }
 
     return {
-        "command": command,
+        "command": executable_command,
         "cwd": str(cwd),
         "exit_code": completed.returncode,
         "stdout": completed.stdout,
@@ -107,11 +110,13 @@ def publish_reviewed_draft(
     publish_log: list[dict[str, object]] = []
 
     command_plan = [
-        _parse_publish_command(build_command),
         ["git", "add", _relative_to_repo(published_path, repo_path)],
         ["git", "commit", "-m", commit_message_template.format(title=title)],
         ["git", "push"],
     ]
+    build_command_parts = _parse_publish_command(build_command)
+    if build_command_parts:
+        command_plan.insert(0, build_command_parts)
 
     for command in command_plan:
         result = run_publish_command(command, repo_path)
@@ -130,9 +135,32 @@ def _parse_publish_command(command: str | list[str]) -> list[str]:
 
     command_text = str(command).strip()
     if not command_text:
-        raise ValueError("publish.build_command 不能为空。")
+        return []
 
     return shlex.split(command_text)
+
+
+def _resolve_executable_command(command: list[str]) -> list[str]:
+    """在 Windows 下把 npm 这类脚本命令解析成可执行文件。
+
+    PowerShell 可以把 ``npm`` 解析成 ``npm.ps1`` 或 ``npm.cmd``，
+    但 ``subprocess.run(..., shell=False)`` 不会经过 PowerShell。
+    因此这里优先寻找 ``.cmd`` / ``.exe`` / ``.bat``，保留 shell=False 的安全边界。
+    """
+
+    if not command or os.name != "nt":
+        return command
+
+    executable = command[0]
+    if Path(executable).suffix:
+        return command
+
+    for suffix in (".cmd", ".exe", ".bat"):
+        resolved = shutil.which(executable + suffix)
+        if resolved:
+            return [resolved, *command[1:]]
+
+    return command
 
 
 def _safe_slug(value: str) -> str:
