@@ -693,3 +693,76 @@ Agent Host
 
 
 
+
+
+## 路径分叉
+
+```python
+# 固定边
+add_edge()
+# 条件边
+# 根据图状态决定下一个节点，实现状态驱动的异步决策
+add_conditional_edges()
+```
+
+
+
+**代码实现**
+
+1. 定义条件边
+
+   通过`add_conditional_edges`注册动态分流器
+
+   ```python
+   graph.add_conditional_edges(
+       "start_node",            # 起始节点
+       route_after_start_node,  # 路由决策函数（Router）
+       {                             # 路由表 (Mapping Table)
+           "next": "next_node",
+           "stop": END,
+       },
+   )
+   ```
+
+2. 路由函数
+
+   通过路由函数读取最新状态来决定返回哪个逻辑标签
+
+   ```python
+   def route_after_start_node(state: State) -> str:
+       if state.get("now_status") == "ok":
+           return "next"
+       return "stop"
+   ```
+
+3. 路由表机制解析
+
+   条件边三个参数是路由表，负责将路由函数返回的“逻辑标签”翻译成真正的“图节点”
+
+   - "next"/"stop"：路由标签，仅代表业务逻辑含义
+   - "next_node"：真正的下一个图节点名
+   - END：LangGraph 内置的特殊结束标记。
+
+
+
+**状态演变**
+
+1. `start_node`节点执行完毕 -> 产生更新
+2. LangGraph捕获最新State ->传入`route_after_start_node(state)`
+3. 条件流转判断
+   1. 分支A：状态ok，进入下一个节点
+   2. 分支B：状态不ok，停止
+
+```mermaid
+flowchart TD
+    A["start_node 节点"] --> B["route_after_start_node(state)"]
+    B -->|"返回 next"| C["next_node (下一个节点)"]
+    B -->|"返回 stop"| D["END (结束流程)"]
+    
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style C fill:#bbf,stroke:#333,stroke-width:1px
+    style D fill:#ffb,stroke:#333,stroke-width:1px
+```
+
+
+
