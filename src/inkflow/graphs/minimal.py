@@ -7,7 +7,8 @@
 3. redaction_review_node：让用户逐条确认脱敏方案。
 4. apply_redaction_node：执行用户确认的脱敏修改并展示 diff。
 5. article_generation_node：生成结构化文章 JSON。
-6. review_node：把结果标记为等待人工审核。
+6. package_node：拼装 Astro Markdown。
+7. review_node：把结果标记为等待人工审核。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
@@ -18,6 +19,7 @@ from inkflow.services.audit import append_audit_event
 from inkflow.services.article import build_placeholder_article, generate_article_data
 from inkflow.services.console_review import confirm_redaction_diff, review_redaction_findings
 from inkflow.services.draft import build_placeholder_draft, generate_draft
+from inkflow.services.packaging import package_astro_markdown
 from inkflow.services.redaction import (
     apply_redaction_with_llm,
     build_text_diff,
@@ -247,11 +249,35 @@ def article_generation_node(state: InkFlowState) -> dict:
     }
 
 
+def package_node(state: InkFlowState) -> dict:
+    """把文章 JSON 拼装成 Astro Markdown。
+
+    这个节点只做格式拼装，不再调用 LLM。
+    这样 frontmatter 字段、引号转义和正文边界都由程序稳定控制。
+    """
+
+    article_data = state["article_data"]
+    final_document = package_astro_markdown(article_data)
+
+    print("=== Astro Markdown ===")
+    print(final_document)
+
+    return {
+        "final_document": final_document,
+        "audit_events": append_audit_event(
+            state.get("audit_events"),
+            "package",
+            "astro_markdown_packaged",
+            {"final_document": final_document},
+        ),
+    }
+
+
 def review_node(state: InkFlowState) -> dict:
     """把工作流标记为等待人工审核。
 
     README 里设计了人工审核节点。这里先只用一个状态字段表达：
-    程序已经生成结构化文章数据，但还没有自动发布。
+    程序已经拼装出 Astro Markdown，但还没有自动发布。
     """
 
     return {"review_status": "pending_human_review"}
@@ -272,6 +298,7 @@ def build_graph():
     graph.add_node("redaction_review", redaction_review_node)
     graph.add_node("apply_redaction", apply_redaction_node)
     graph.add_node("article_generation", article_generation_node)
+    graph.add_node("package", package_node)
     graph.add_node("draft", draft_node)
     graph.add_node("review", review_node)
 
@@ -296,7 +323,8 @@ def build_graph():
             "stop": END,
         },
     )
-    graph.add_edge("article_generation", "review")
+    graph.add_edge("article_generation", "package")
+    graph.add_edge("package", "review")
     graph.add_edge("review", END)
 
     return graph.compile()
