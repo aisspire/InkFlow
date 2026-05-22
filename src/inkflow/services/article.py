@@ -9,6 +9,7 @@ LangGraph 节点只需要传入脱敏后的文本，本模块负责：
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from inkflow.llm import (
     load_llm_config,
 )
 from inkflow.prompts import build_article_messages
+from inkflow.services.console_input import read_user_input
 from inkflow.state import ArticleData
 
 MAX_ARTICLE_QUESTIONS = 3
@@ -60,7 +62,7 @@ def generate_article_data(
             question = _string_value(response_data.get("question"), "请补充这篇文章的写作方向：")
             print("=== Article Question ===")
             print(question)
-            answer = _read_user_input("你的回答：")
+            answer = read_user_input("你的回答：")
             qa_history.append({"question": question, "answer": answer})
             continue
 
@@ -86,9 +88,11 @@ def build_placeholder_article(text: str, *, today: str | None = None) -> Article
 
     return {
         "title": title,
+        "slug": _safe_slug(title),
         "description": "由 InkFlow 本地占位逻辑生成的文章描述。",
         "date": active_today,
         "tags": ["InkFlow"],
+        "authors": ["huijue"],
         "draft": False,
         "body": text.strip() or "（空输入）",
     }
@@ -105,7 +109,8 @@ def _parse_json_object(response_text: str) -> dict[str, Any]:
         end = stripped_text.rfind("}")
         if start == -1 or end == -1 or end < start:
             raise ValueError("LLM 未返回 JSON 对象。") from None
-        parsed = json.loads(stripped_text[start : end + 1])
+        candidate_text = stripped_text[start : end + 1]
+        parsed = _loads_json_with_backslash_repair(candidate_text)
 
     if not isinstance(parsed, dict):
         raise ValueError("LLM 返回的 JSON 根节点不是对象。")
@@ -113,17 +118,73 @@ def _parse_json_object(response_text: str) -> dict[str, Any]:
     return parsed
 
 
+def _loads_json_with_backslash_repair(json_text: str) -> dict[str, Any]:
+    """解析 JSON；遇到 Markdown 正文里的非法反斜杠时做一次保守修复。
+
+    LLM 有时会把 Markdown 正文里的 Windows 路径或 LaTeX 片段直接写进 JSON 字符串，
+    例如 ``C:\\project``。JSON 只允许少数反斜杠转义，这类内容会触发
+    ``Invalid \\escape``。这里只把字符串内部的非法反斜杠补成普通反斜杠字符。
+    """
+
+    try:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError as error:
+        if "Invalid \\escape" not in str(error):
+            raise
+        parsed = json.loads(_escape_invalid_json_backslashes(json_text))
+
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM 返回的 JSON 根节点不是对象。")
+    return parsed
+
+
+def _escape_invalid_json_backslashes(json_text: str) -> str:
+    """把 JSON 字符串内部不合法的反斜杠转义改成普通反斜杠。"""
+
+    valid_escape_chars = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
+    result: list[str] = []
+    in_string = False
+    escaped = False
+
+    for character in json_text:
+        if escaped:
+            if in_string and character not in valid_escape_chars:
+                result.append("\\")
+            result.append(character)
+            escaped = False
+            continue
+
+        if in_string and character == "\\":
+            result.append(character)
+            escaped = True
+            continue
+
+        if character == '"':
+            in_string = not in_string
+
+        result.append(character)
+
+    return "".join(result)
+
+
 def _normalize_article(raw_article: dict[str, Any], today: str) -> ArticleData:
     """把模型输出收敛成 ArticleData，避免缺字段影响后续节点。"""
 
     tags = raw_article.get("tags")
     normalized_tags = [str(tag) for tag in tags] if isinstance(tags, list) else []
+    authors = raw_article.get("authors")
+    normalized_authors = [str(author) for author in authors] if isinstance(authors, list) else []
 
     return {
         "title": _string_value(raw_article.get("title"), "InkFlow Draft"),
+        "slug": _safe_slug(
+            _string_value(raw_article.get("slug"), "")
+            or _string_value(raw_article.get("title"), "InkFlow Draft")
+        ),
         "description": _string_value(raw_article.get("description"), ""),
         "date": _string_value(raw_article.get("date"), today),
         "tags": normalized_tags,
+        "authors": normalized_authors or ["huijue"],
         "draft": _bool_value(raw_article.get("draft"), False),
         "body": _string_value(raw_article.get("body"), ""),
     }
@@ -152,7 +213,11 @@ def _bool_value(value: Any, default: bool) -> bool:
     return default
 
 
-def _read_user_input(prompt: str) -> str:
-    """读取终端输入，并清理 PowerShell 管道输入可能带来的 BOM。"""
+def _safe_slug(value: str) -> str:
+    """把模型给出的 slug 收敛成朴素 URL 片段。"""
 
-    return input(prompt).lstrip("\ufeff").strip()
+    slug = value.strip().lower()
+    slug = re.sub(r"[^a-z0-9-]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug)
+    slug = slug.strip("-")
+    return slug[:80] or "article"

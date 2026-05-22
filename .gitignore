@@ -2,3 +2,5 @@
 __pycache__
 llm.toml
 docs/
+reviews/
+reports/

@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from inkflow.services.console_input import read_user_input
+
 
 def write_review_file(document: str, title: str, review_dir: Path) -> Path:
     """把待发布文章写入本地 reviews 目录。
@@ -42,7 +44,7 @@ def review_generated_draft(review_path: Path) -> tuple[str, str]:
     print("s：停止流程")
     print("其它内容：作为修改建议回到生成阶段")
 
-    user_input = _read_user_input("你的选择：")
+    user_input = read_user_input("你的选择：")
     lowered_input = user_input.lower()
     if lowered_input == "y":
         return "accepted", ""
@@ -78,8 +80,3 @@ def _next_available_path(path: Path) -> Path:
 
     raise RuntimeError(f"无法为审阅稿找到可用文件名：{path}")
 
-
-def _read_user_input(prompt: str) -> str:
-    """读取终端输入，并清理 PowerShell 管道输入可能带来的 BOM。"""
-
-    return input(prompt).lstrip("\ufeff").strip()

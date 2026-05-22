@@ -372,6 +372,7 @@ def publish_node(state: InkFlowState) -> dict:
             content_dir,
             build_command,
             commit_message_template,
+            slug_source=article_data.get("slug"),
         )
         review_status = "published" if _publish_log_succeeded(publish_log) else "publish_failed"
     except Exception as error:

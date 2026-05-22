@@ -49,13 +49,14 @@ class ArticleData(TypedDict):
     """
 
     title: str
+    slug: NotRequired[str]
     description: str
     date: str
     body: str
     order: NotRequired[int]
     image: NotRequired[str]
     tags: NotRequired[list[str]]
-    authors: NotRequired[list[str]]
+    authors: list[str]
     draft: NotRequired[bool]
 
 

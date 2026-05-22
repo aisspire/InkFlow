@@ -44,9 +44,11 @@ def build_article_messages(
   "needs_user_input": false,
   "article": {{
     "title": "文章标题",
+    "slug": "article-url-slug",
     "description": "文章描述",
     "date": "{today}",
     "tags": ["标签"],
+    "authors": ["huijue"],
     "draft": false,
     "body": "Markdown 正文"
   }}
@@ -54,8 +56,12 @@ def build_article_messages(
 
 要求：
 - date 使用 YYYY-MM-DD 格式；如果没有明确发布日期，使用 {today}。
+- slug 是发布路径里的文件夹名，只能使用小写英文、数字和连字符 -，不要使用中文、空格或下划线。
+- slug 要朴素直接，优先用 3 到 8 个英文单词表达主题，例如 langgraph-content-workflow。
 - body 必须是完整 Markdown 正文，不要包含 frontmatter。
-- tags 可以为空数组。
+- 返回 JSON 字符串时必须正确转义反斜杠，例如 Windows 路径里的 \\ 要写成 \\\\。
+- tags 可以为空数组，最终 frontmatter 会拼成 `tags: ['tag1', 'tag2']` 这种单行格式。
+- authors 必须返回，默认固定为 ["huijue"]。
 - 文章应适合公开发布，不要重新引入脱敏前的敏感信息。
 
 用户额外修改建议：

@@ -128,7 +128,7 @@ dir = "reports"
 - `input_path`：默认输入文件。命令行 `--input` 会覆盖它。
 - `review.dir`：审阅稿输出目录。相对路径按配置文件所在目录解析。
 - `blog.repo_path`：静态博客仓库路径。留空时发布节点会失败并写入报告，不会猜测目标目录。
-- `blog.content_dir`：博客仓库内的 Astro 内容目录。
+- `blog.content_dir`：博客仓库内的 Astro 内容根目录。发布时会在这个目录下创建文章 slug 文件夹，并写入 `index.mdx`。
 - `publish.build_command`：复制文章后执行的构建检查命令，默认是 `npm run build`。
 - `publish.commit_message_template`：发布提交信息模板，可使用 `{title}`。
 - `report.dir`：报告输出目录。相对路径按配置文件所在目录解析。
@@ -149,13 +149,15 @@ Copy-Item llm.example.toml llm.toml
 
 用户在审阅稿阶段选择 `y`，且没有传入 `--no-publish` 时，发布节点会按固定顺序执行：
 
-1. 把 `reviews/*.md` 复制到 `blog.repo_path / blog.content_dir`。
+1. 把审阅稿复制到 `blog.repo_path / blog.content_dir / <slug> / index.mdx`。
 2. 在博客仓库运行 `publish.build_command`。
 3. 运行 `git add <published_file>`。
 4. 运行 `git commit -m "publish: {title}"`。
 5. 运行 `git push`。
 
-发布命令由程序按固定列表组装，LLM 不参与生成命令。任一步失败后，后续命令不会继续执行，失败结果会写入 `publish_log` 和报告。
+`<slug>` 来自文章 JSON 里的 `slug` 字段。模型会被要求生成朴素的小写英文 slug，只允许英文、数字和连字符；程序发布前还会再清洗一次。发布命令由程序按固定列表组装，LLM 不参与生成命令。任一步失败后，后续命令不会继续执行，失败结果会写入 `publish_log` 和报告。
+
+Astro frontmatter 中的 `tags` 和 `authors` 会输出为单行数组，例如 `tags: ['LangGraph', '工作流', 'LLM', '笔记']` 和 `authors: ['huijue']`。`authors` 是必填字段；模型未返回时程序默认使用 `huijue`。
 
 ## 报告和安全边界
 

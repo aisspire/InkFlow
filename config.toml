@@ -6,7 +6,7 @@ input_path = "note.md"
 dir = "reviews"
 
 [blog]
-repo_path = ""
+repo_path = "E:/code/huijue.top"
 content_dir = "src/content/blog"
 
 [publish]
