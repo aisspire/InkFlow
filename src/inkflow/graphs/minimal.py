@@ -300,7 +300,9 @@ def write_review_node(state: InkFlowState) -> dict:
     action, feedback = review_generated_draft(review_path)
 
     approved = action == "accepted"
-    if action == "accepted":
+    if action == "accepted" and _publish_disabled(state.get("config", {})):
+        review_status = "accepted_no_publish"
+    elif action == "accepted":
         review_status = "accepted_for_publish"
     elif action == "redact_again":
         review_status = "review_returned_to_redaction"
@@ -337,6 +339,8 @@ def route_after_write_review(state: InkFlowState) -> str:
     """
 
     action = state.get("review_action")
+    if action == "accepted" and _publish_disabled(state.get("config", {})):
+        return "stop"
     if action == "accepted":
         return "publish"
     if action == "redact_again":
@@ -468,6 +472,18 @@ def _resolve_publish_config(config: dict) -> tuple[Path, str, str | list[str], s
     )
 
     return repo_path, content_dir, build_command, commit_message_template
+
+
+def _publish_disabled(config: dict) -> bool:
+    """判断本次运行是否显式跳过发布阶段。
+
+    这个开关主要来自命令行 ``--no-publish``，用于只生成审阅稿和报告。
+    """
+
+    publish_config = config.get("publish", {})
+    if not isinstance(publish_config, dict):
+        return False
+    return bool(publish_config.get("no_publish", False))
 
 
 def _publish_log_succeeded(publish_log: list[dict[str, object]]) -> bool:

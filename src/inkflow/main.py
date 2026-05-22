@@ -1,6 +1,7 @@
 """用于尝试第一版 InkFlow 图的命令行入口。"""
 
 import argparse
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -13,13 +14,27 @@ DEFAULT_CONFIG_PATH = Path("config.toml")
 DEFAULT_EXAMPLE_TEXT = "LangGraph 很适合多阶段内容处理。这里有一个 password 示例。"
 
 
+def configure_utf8_stdio() -> None:
+    """让 Windows 终端也能稳定打印 UTF-8 内容。
+
+    工作流会把原文、diff 和 Markdown 打到终端。
+    如果 PowerShell 当前输出编码是 GBK，遇到少见符号时可能抛出 UnicodeEncodeError。
+    """
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def parse_args() -> argparse.Namespace:
     """解析命令行参数。
 
     argparse 是 Python 标准库里的命令行参数解析工具。
-    这里先只支持两个参数，保持入口简单：
+    这里先只支持少量参数，保持入口简单：
     - --config：指定配置文件路径。
     - --input：直接指定要读取的输入文件路径。
+    - --no-publish：只生成审阅稿和报告，不执行博客发布命令。
     """
 
     parser = argparse.ArgumentParser(description="运行 InkFlow 最小工作流。")
@@ -31,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         help="输入文件路径；如果传入它，会覆盖配置文件里的 input_path。",
+    )
+    parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="只生成审阅稿和报告；即使审阅时选择发布，也不会执行复制、构建、git 提交或推送。",
     )
     return parser.parse_args()
 
@@ -82,8 +102,17 @@ def read_input_text(input_path: Path | None) -> str:
 def main() -> None:
     """读取输入文件并运行一次最小工作流。"""
 
+    configure_utf8_stdio()
+
     args = parse_args()
     config = load_config(Path(args.config))
+    if args.no_publish:
+        # 命令行开关优先级最高，用配置状态告诉图路由跳过发布节点。
+        publish_config = config.setdefault("publish", {})
+        if not isinstance(publish_config, dict):
+            publish_config = {}
+            config["publish"] = publish_config
+        publish_config["no_publish"] = True
     input_path = resolve_input_path(args, config)
     raw_text = read_input_text(input_path)
 

@@ -1,112 +1,186 @@
 # InkFlow
 
-InkFlow 是一个用于学习 LangGraph 的内容工作流项目。当前阶段先实现最小流程：读取一段本地文本，经过预处理、草稿生成和人工审核标记，然后在终端输出结果。
+InkFlow 是一个用于学习 LangGraph 的半自动内容发布工作流项目。它把一份本地 Markdown 或文本输入，依次经过脱敏审查、人工确认、文章生成、Astro Markdown 拼装、本地审阅、可选发布和完整报告记录。
+
+这个项目当前更偏学习和流程验证：每个节点都尽量保持清楚，方便观察 LangGraph 状态如何在节点之间流转，也方便以后继续扩展 RAG、事实检查、Web 审阅界面或更多内容来源。
 
 ## 快速运行
 
-当前入口是 `src/inkflow/main.py`，可以用默认配置运行：
+项目使用 Python 3.11 和 `src` 目录布局。请在项目根目录按模块方式启动，不要直接运行 `src/inkflow/main.py`。
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m inkflow.main --input note.md
+```
+
+只生成审阅稿和报告，不执行博客仓库复制、构建、commit 或 push：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m inkflow.main --input note.md --no-publish
+```
+
+使用配置文件里的默认输入：
 
 ```powershell
 $env:PYTHONPATH = "src"
 python -m inkflow.main
 ```
 
-注意：这个项目采用 `src` 目录布局。请在项目根目录用 `python -m inkflow.main`
-按“模块”方式启动，不要直接运行 `src/inkflow/main.py`。直接运行文件时，
-Python 只会把 `src/inkflow` 当作搜索路径，因此找不到顶层包 `inkflow`。
-
-默认会读取项目根目录下的 `config.toml`：
-
-```toml
-input_path = "note.md"
-```
-
-如果想临时指定其它输入文件，可以用 `--input` 覆盖配置文件里的 `input_path`：
-
-```powershell
-$env:PYTHONPATH = "src"
-python -m inkflow.main --input README.md
-```
-
-也可以通过 `--config` 指定另一份配置文件：
+指定另一份配置文件：
 
 ```powershell
 $env:PYTHONPATH = "src"
 python -m inkflow.main --config config.toml
 ```
 
-当前版本只会读取指定的本地文件，并把生成的草稿打印到终端；还不会写入博客仓库，也不会执行发布或推送操作。
+如果还没有安装依赖，可以先运行：
 
-## 技术选型
+```powershell
+pip install -e .
+```
 
-LangGraph，其基于状态机设计，非常适合我这种多阶段处理和人工介入的设计
+## 当前工作流
 
-Rust，可以作为调用python的外围工具链
+默认命令会运行完整 LangGraph 流程：
 
+```text
+读取输入
+  -> 基础预处理
+  -> 生成脱敏审查方案
+  -> 终端逐条确认
+  -> 必要时执行脱敏并展示 diff
+  -> 重新复查脱敏结果
+  -> 生成结构化文章 JSON
+  -> 拼装 Astro Markdown
+  -> 写入本地审阅稿
+  -> 用户接受后发布到静态博客仓库
+  -> 写入 JSONL 审计日志和 Markdown 报告
+```
 
+如果传入 `--no-publish`，审阅稿被接受后会直接进入报告节点，发布节点不会执行。
 
-## 架构设计与工作流
+## 终端交互
 
-可以设计为**多输入、标准化处理、单输出**的Agent系统。
+### 脱敏方案审查
 
-**核心工作流节点**
+程序会展示 LLM 发现的敏感项，包括风险等级、行号、问题、原因、原文片段和建议。
 
-1. 输入触发
-   - 本地笔记流：监听或主动上传指定本地markdown文件
-   - Github流：定时请求GithubAPI/Webhook（网络钩子），获取最新Release Diff或Release Notes
-   - 新闻流：利用RSS解析器或联网搜索，抓取指定领域的每日新闻
-2. 内容预处理
-   - 历史检索：将主题向量化，去本地向量数据库（如lanceDB / Chroma）检索。如果相似度过高，则用户进行合并或者跳过
-   - Github上下文组装：如果是代码更新，自动检索之前的项目文章，提取需要更新的上下文
-3. 大纲与草稿生成
-   - 去除初始敏感信息
-   - 生成摘要、大纲
-   - 根据大纲扩写正文，并根据来源或发布目标动态应用不同的写作风格
-4. 润色与包装
-   - SEO与标题：生成吸引人的多版本标题和描述
-   - 标签聚合：根据内容自动生成Tags，并维护Tags列表
-   - 固定格式注入：添加文章元数据，使其适合在博客上展示
-5. 严格审查
-   - 事实检查：通过联网搜索验证文章中的关键断言
-   - 引用致谢：检查github的贡献者是否遗漏、新闻来源出处（链接）是否完整保留
-   - 敏感信息复核：建立本地的黑名单词库+LLM判别，确保IP、密码、内部人名、未公开项目名被`***`替换
-6. 人工审核节点
-   - 流程在这里暂停
-   - 通过终端或者简易Web界面展示预览、相似度报告和事实检查报告
-   - 根据情况选择是否发布、修改意见、手动编辑覆盖
-7. 确认后的内容将转换为标准的Markdown/MDX文件，写入本地指定的博客仓库目录，执行推送操作
+- `s`：停止流程，进入报告节点。
+- `n`：忽略当前敏感项，不执行修改。
+- 直接回车：采用 LLM 给出的建议。
+- 输入其它内容：把这段内容作为你的最终修改方案。
 
+所有敏感项处理完后，还需要输入：
 
+- `y`：进入下一步。
+- `s`：停止流程，进入报告节点。
 
+### 脱敏 diff 确认
 
+当存在需要执行的脱敏决策时，程序会让 LLM 返回完整改写文本，并展示 unified diff。
 
-## 细节实现
+- `y`：接受本次修改，并回到脱敏方案节点重新复查。
+- `n`：不接受本次 diff，按原决策重新尝试。
+- `s`：停止流程，进入报告节点。
+- 输入其它内容：作为额外建议，让 LLM 重新改写。
 
-### RAG 本地知识库（解决“去重”和“风格统一”）
+### 文章生成追问
 
-仅靠 LLM 是无法知道“以前写过什么”的。引入本地轻量级向量库（推荐 `LanceDB` 或 `Chroma`）：
+文章生成节点会让 LLM 输出结构化 JSON。模型如果认为信息不足，可以向用户追问，最多追问 3 次。每次问答都会写入审计事件。
 
-- **用途 A**：每次写文章前，检索库中是否有类似主题。如果有，LLM 的任务变成“在旧文章基础上补充新知识”或“写一篇差异化视角的文章”。
-- **用途 B**：将你最满意的几篇历史文章存入，每次生成时作为 Few-Shot Prompt 提供给 LLM，这样能 100% 模仿你的个人笔风。
+如果没有启用 LLM，或文章生成失败，程序会降级为本地占位文章，用来继续验证后续 Markdown 拼装、审阅稿和报告流程。
 
+### 审阅稿确认
 
+程序会把拼装后的 Astro Markdown 写入 `reviews/`，然后等待用户选择：
 
-### 信息可信度评分
+- `y`：接受审阅稿。普通模式会进入发布节点；`--no-publish` 模式会直接进入报告节点。
+- `d`：回到脱敏阶段。
+- `g`：回到文章生成阶段。
+- `s`：停止流程，进入报告节点。
+- 输入其它内容：作为修改建议，回到文章生成阶段。
 
-新闻采集中，容易遇到幻觉或者假新闻。可以通过交叉验证进行评价
+## 配置
 
-- 让Agent比较2-3个不同的源，横向对比进行进行验证
-- 若信息只在一个不知名源出现，Agent可以在生成文章中自动加上免责声明之类的，或者直接剔除
+当前默认配置在 `config.toml`：
 
+```toml
+input_path = "note.md"
 
+[review]
+dir = "reviews"
 
-### 敏感信息的双重保险
+[blog]
+repo_path = ""
+content_dir = "src/content/blog"
 
-只依赖LLM去除不够保险，通过python正则表达处理，并提示，增加LLM中的指示
+[publish]
+build_command = "npm run build"
+commit_message_template = "publish: {title}"
 
+[report]
+dir = "reports"
+```
 
+配置说明：
 
-### 更新补丁的实现
+- `input_path`：默认输入文件。命令行 `--input` 会覆盖它。
+- `review.dir`：审阅稿输出目录。相对路径按配置文件所在目录解析。
+- `blog.repo_path`：静态博客仓库路径。留空时发布节点会失败并写入报告，不会猜测目标目录。
+- `blog.content_dir`：博客仓库内的 Astro 内容目录。
+- `publish.build_command`：复制文章后执行的构建检查命令，默认是 `npm run build`。
+- `publish.commit_message_template`：发布提交信息模板，可使用 `{title}`。
+- `report.dir`：报告输出目录。相对路径按配置文件所在目录解析。
 
-比起重新生成，使用类似代码Diff的思路，让LLM比较新老版本功能后仅仅在特定部分进行新增或修改，并更新版本号
+## LLM 配置
 
+真实模型配置使用 `llm.toml`。先复制示例文件：
+
+```powershell
+Copy-Item llm.example.toml llm.toml
+```
+
+然后按你的服务修改 `[llm]` 配置，并设置 `api_key_env` 指向的环境变量。`llm.toml` 已在 `.gitignore` 中忽略，不要提交真实密钥或私有模型配置。
+
+当前第一版只支持 OpenAI-compatible 接口。`enabled = false` 时，脱敏 findings 会返回空列表，文章生成会使用本地占位文章，方便离线学习流程。
+
+## 发布行为
+
+用户在审阅稿阶段选择 `y`，且没有传入 `--no-publish` 时，发布节点会按固定顺序执行：
+
+1. 把 `reviews/*.md` 复制到 `blog.repo_path / blog.content_dir`。
+2. 在博客仓库运行 `publish.build_command`。
+3. 运行 `git add <published_file>`。
+4. 运行 `git commit -m "publish: {title}"`。
+5. 运行 `git push`。
+
+发布命令由程序按固定列表组装，LLM 不参与生成命令。任一步失败后，后续命令不会继续执行，失败结果会写入 `publish_log` 和报告。
+
+## 报告和安全边界
+
+每次流程结束会尽量生成两类本地报告：
+
+- `reports/<run_id>.jsonl`：完整审计事件，每行一条 JSON。
+- `reports/<run_id>.md`：人类可读的流程报告。
+
+报告会保存敏感内容、脱敏方案、用户选择、LLM 输出、diff、最终 Markdown、发布目标路径和命令返回结果。`reports/` 和 `reviews/` 可能包含不适合公开的内容，提交公开仓库前请人工确认，不要把敏感审计记录、审阅稿或真实博客发布日志提交出去。
+
+## 项目结构
+
+```text
+src/inkflow/main.py              命令行入口，读取配置和输入文件
+src/inkflow/graphs/minimal.py    LangGraph 节点和路由
+src/inkflow/state/workflow.py    工作流共享状态类型
+src/inkflow/services/            脱敏、文章生成、包装、审阅、发布、报告等服务
+src/inkflow/prompts/             LLM prompt 组装
+config.toml                      本地工作流配置
+llm.example.toml                 LLM 配置示例
+```
+
+## 后续方向
+
+- 增加本地知识库，用于去重、风格参考和历史文章上下文检索。
+- 增加事实检查和引用完整性检查。
+- 把终端审阅升级为更清楚的 Web 审阅界面。
+- 为发布前检查增加更细的安全开关和回滚记录。
