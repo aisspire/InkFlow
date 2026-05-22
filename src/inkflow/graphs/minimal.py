@@ -9,6 +9,7 @@
 5. article_generation_node：生成结构化文章 JSON。
 6. package_node：拼装 Astro Markdown。
 7. write_review_node：写入本地审阅稿并收集用户选择。
+8. publish_node：发布到静态博客仓库。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
@@ -22,6 +23,7 @@ from inkflow.services.article import build_placeholder_article, generate_article
 from inkflow.services.console_review import confirm_redaction_diff, review_redaction_findings
 from inkflow.services.draft import build_placeholder_draft, generate_draft
 from inkflow.services.packaging import package_astro_markdown
+from inkflow.services.publish import publish_reviewed_draft
 from inkflow.services.redaction import (
     apply_redaction_with_llm,
     build_text_diff,
@@ -327,17 +329,115 @@ def write_review_node(state: InkFlowState) -> dict:
 def route_after_write_review(state: InkFlowState) -> str:
     """根据审阅选择决定回到哪一个节点。
 
-    accepted 目前先结束，Task 9 会把它接到发布节点；
+    accepted 会进入发布节点；
     regenerate 会携带 article_feedback 回到文章生成节点；
     redact_again 会回到脱敏方案节点重新审查。
     """
 
     action = state.get("review_action")
+    if action == "accepted":
+        return "publish"
     if action == "redact_again":
         return "redact_again"
     if action == "regenerate":
         return "regenerate"
     return "stop"
+
+
+def publish_node(state: InkFlowState) -> dict:
+    """把已接受的审阅稿发布到静态博客仓库。
+
+    发布动作包括复制文件、构建检查和 git 命令。
+    所有命令结果都会写入 publish_log，方便后续 Task 10 生成完整报告。
+    """
+
+    config = state.get("config", {})
+    article_data = state["article_data"]
+    warnings = list(state.get("warnings", []))
+
+    try:
+        blog_repo, content_dir, build_command, commit_message_template = (
+            _resolve_publish_config(config)
+        )
+        publish_path, publish_log = publish_reviewed_draft(
+            Path(state["review_path"]),
+            article_data["title"],
+            blog_repo,
+            content_dir,
+            build_command,
+            commit_message_template,
+        )
+        review_status = "published" if _publish_log_succeeded(publish_log) else "publish_failed"
+    except Exception as error:
+        warnings.append(f"发布流程失败：{error}")
+        publish_path = None
+        publish_log = [
+            {
+                "command": [],
+                "cwd": "",
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": str(error),
+            }
+        ]
+        review_status = "publish_failed"
+
+    return {
+        "publish_path": str(publish_path) if publish_path is not None else "",
+        "publish_log": publish_log,
+        "review_status": review_status,
+        "warnings": warnings,
+        "audit_events": append_audit_event(
+            state.get("audit_events"),
+            "publish",
+            "publish_commands_finished",
+            {
+                "publish_path": str(publish_path) if publish_path is not None else "",
+                "publish_log": publish_log,
+                "review_status": review_status,
+            },
+        ),
+    }
+
+
+def _resolve_publish_config(config: dict) -> tuple[Path, str, str | list[str], str]:
+    """从配置中读取发布目标和命令。
+
+    repo_path 为空时直接报错，避免用户误把内容发布到未知位置。
+    相对路径按 config.toml 所在目录解析，和 review.dir 保持一致。
+    """
+
+    blog_config = config.get("blog", {})
+    if not isinstance(blog_config, dict):
+        blog_config = {}
+    publish_config = config.get("publish", {})
+    if not isinstance(publish_config, dict):
+        publish_config = {}
+
+    repo_path_text = str(blog_config.get("repo_path", "")).strip()
+    if not repo_path_text:
+        raise ValueError("请先在 config.toml 的 [blog].repo_path 中配置静态博客仓库路径。")
+
+    repo_path = Path(repo_path_text)
+    if not repo_path.is_absolute():
+        repo_path = Path(str(config.get("_config_dir", "."))) / repo_path
+
+    content_dir = str(blog_config.get("content_dir", "src/content/blog")).strip()
+    if not content_dir:
+        raise ValueError("blog.content_dir 不能为空。")
+
+    build_command = publish_config.get("build_command", "npm run build")
+    commit_message_template = str(
+        publish_config.get("commit_message_template", "publish: {title}")
+    )
+
+    return repo_path, content_dir, build_command, commit_message_template
+
+
+def _publish_log_succeeded(publish_log: list[dict[str, object]]) -> bool:
+    """判断所有已执行发布命令是否都成功。"""
+
+    return bool(publish_log) and all(result.get("exit_code") == 0 for result in publish_log)
 
 
 def _resolve_review_dir(config: dict) -> Path:
@@ -377,6 +477,7 @@ def build_graph():
     graph.add_node("package", package_node)
     graph.add_node("draft", draft_node)
     graph.add_node("write_review", write_review_node)
+    graph.add_node("publish", publish_node)
 
     # 定义状态在图里的流转路线。
     graph.add_edge(START, "preprocess")
@@ -405,10 +506,12 @@ def build_graph():
         "write_review",
         route_after_write_review,
         {
+            "publish": "publish",
             "redact_again": "redaction_plan",
             "regenerate": "article_generation",
             "stop": END,
         },
     )
+    graph.add_edge("publish", END)
 
     return graph.compile()

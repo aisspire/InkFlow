@@ -4,3 +4,11 @@ input_path = "note.md"
 
 [review]
 dir = "reviews"
+
+[blog]
+repo_path = ""
+content_dir = "src/content/blog"
+
+[publish]
+build_command = "npm run build"
+commit_message_template = "publish: {title}"

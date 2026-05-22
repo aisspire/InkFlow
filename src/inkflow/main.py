@@ -126,6 +126,26 @@ def main() -> None:
         print("未生成审阅文件。")
     print()
 
+    print("=== Publish Path ===")
+    if "publish_path" in final_state and final_state["publish_path"]:
+        print(final_state["publish_path"])
+    else:
+        print("未发布到博客仓库。")
+    print()
+
+    print("=== Publish Log ===")
+    publish_log = final_state.get("publish_log", [])
+    if publish_log:
+        for item in publish_log:
+            command = item.get("command", [])
+            exit_code = item.get("exit_code")
+            print(f"- command={command} exit_code={exit_code}")
+            if item.get("stderr"):
+                print(f"  stderr={item['stderr']}")
+    else:
+        print("无")
+    print()
+
     print("=== Warnings ===")
     warnings = final_state.get("warnings", [])
     if warnings:
