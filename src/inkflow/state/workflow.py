@@ -97,6 +97,7 @@ class InkFlowState(TypedDict):
     publish_path: NotRequired[str]
     publish_log: NotRequired[list[dict[str, Any]]]
     report_path: NotRequired[str]
+    report_jsonl_path: NotRequired[str]
     audit_events: NotRequired[list[dict[str, Any]]]
 
     # 文章草稿内容。第一版先用占位文本模拟，暂时不接入 LLM。

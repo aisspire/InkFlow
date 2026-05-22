@@ -146,6 +146,17 @@ def main() -> None:
         print("无")
     print()
 
+    print("=== Report Path ===")
+    if "report_path" in final_state:
+        print(final_state["report_path"])
+    else:
+        print("未生成 Markdown 报告。")
+    if "report_jsonl_path" in final_state:
+        print(final_state["report_jsonl_path"])
+    else:
+        print("未生成 JSONL 审计日志。")
+    print()
+
     print("=== Warnings ===")
     warnings = final_state.get("warnings", [])
     if warnings:

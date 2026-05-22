@@ -10,6 +10,7 @@
 6. package_node：拼装 Astro Markdown。
 7. write_review_node：写入本地审阅稿并收集用户选择。
 8. publish_node：发布到静态博客仓库。
+9. report_node：写入完整流程报告。
 
 后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
 """
@@ -29,6 +30,7 @@ from inkflow.services.redaction import (
     build_text_diff,
     generate_redaction_findings,
 )
+from inkflow.services.report import build_run_id, write_audit_jsonl, write_markdown_report
 from inkflow.services.review_output import review_generated_draft, write_review_file
 from inkflow.state import InkFlowState
 
@@ -400,6 +402,40 @@ def publish_node(state: InkFlowState) -> dict:
     }
 
 
+def report_node(state: InkFlowState) -> dict:
+    """写入完整流程报告。
+
+    报告节点尽量作为所有出口的最后一步。
+    即使流程被用户停止、发布失败，也会保留当时已有的状态，方便复盘。
+    """
+
+    report_dir = _resolve_report_dir(state.get("config", {}))
+    run_id = build_run_id()
+    report_events = append_audit_event(
+        state.get("audit_events"),
+        "report",
+        "report_written",
+        {
+            "run_id": run_id,
+            "report_dir": str(report_dir),
+        },
+    )
+    state_for_report: InkFlowState = dict(state)
+    state_for_report["audit_events"] = report_events
+
+    audit_path = write_audit_jsonl(report_events, report_dir, run_id)
+    markdown_path = write_markdown_report(state_for_report, report_dir, run_id)
+
+    return {
+        "report_path": str(markdown_path),
+        "report_jsonl_path": str(audit_path),
+        "audit_events": report_events,
+        "warnings": state.get("warnings", []),
+        "publish_log": state.get("publish_log", []),
+        "publish_path": state.get("publish_path", ""),
+    }
+
+
 def _resolve_publish_config(config: dict) -> tuple[Path, str, str | list[str], str]:
     """从配置中读取发布目标和命令。
 
@@ -440,6 +476,21 @@ def _publish_log_succeeded(publish_log: list[dict[str, object]]) -> bool:
     return bool(publish_log) and all(result.get("exit_code") == 0 for result in publish_log)
 
 
+def _resolve_report_dir(config: dict) -> Path:
+    """从配置中解析报告目录。"""
+
+    report_config = config.get("report", {})
+    if not isinstance(report_config, dict):
+        report_config = {}
+
+    report_dir = Path(str(report_config.get("dir", "reports")))
+    if report_dir.is_absolute():
+        return report_dir
+
+    config_dir = Path(str(config.get("_config_dir", ".")))
+    return config_dir / report_dir
+
+
 def _resolve_review_dir(config: dict) -> Path:
     """从配置中解析审阅稿目录。
 
@@ -478,6 +529,7 @@ def build_graph():
     graph.add_node("draft", draft_node)
     graph.add_node("write_review", write_review_node)
     graph.add_node("publish", publish_node)
+    graph.add_node("report", report_node)
 
     # 定义状态在图里的流转路线。
     graph.add_edge(START, "preprocess")
@@ -487,7 +539,7 @@ def build_graph():
         "redaction_review",
         route_after_redaction_review,
         {
-            "stop": END,
+            "stop": "report",
             "apply_redaction": "apply_redaction",
             "article_generation": "article_generation",
         },
@@ -497,7 +549,7 @@ def build_graph():
         route_after_apply_redaction,
         {
             "recheck": "redaction_plan",
-            "stop": END,
+            "stop": "report",
         },
     )
     graph.add_edge("article_generation", "package")
@@ -509,9 +561,10 @@ def build_graph():
             "publish": "publish",
             "redact_again": "redaction_plan",
             "regenerate": "article_generation",
-            "stop": END,
+            "stop": "report",
         },
     )
-    graph.add_edge("publish", END)
+    graph.add_edge("publish", "report")
+    graph.add_edge("report", END)
 
     return graph.compile()

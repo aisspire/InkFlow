@@ -12,3 +12,6 @@ content_dir = "src/content/blog"
 [publish]
 build_command = "npm run build"
 commit_message_template = "publish: {title}"
+
+[report]
+dir = "reports"
