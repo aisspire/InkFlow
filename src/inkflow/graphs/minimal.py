@@ -19,6 +19,7 @@ from pathlib import Path
 
 from langgraph.graph import END, START, StateGraph
 
+from inkflow.console_log import log_hidden_content, log_item, log_message, log_section
 from inkflow.services.audit import append_audit_event
 from inkflow.services.article import build_placeholder_article, generate_article_data
 from inkflow.services.console_review import confirm_redaction_diff, review_redaction_findings
@@ -97,9 +98,12 @@ def redaction_plan_node(state: InkFlowState) -> dict:
     text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
     findings = generate_redaction_findings(text)
 
-    # 先把 findings 打印出来，方便当前阶段手动观察 LLM 或本地降级结果。
-    print("=== Redaction Findings ===")
-    print(findings)
+    log_section("Redaction Findings")
+    if findings:
+        log_item("数量", len(findings))
+        log_hidden_content("详情")
+    else:
+        log_message("未发现需要人工处理的敏感项。")
 
     return {
         "redaction_findings": findings,
@@ -187,7 +191,10 @@ def apply_redaction_node(state: InkFlowState) -> dict:
             }
 
         diff = build_text_diff(source_text, next_text)
-        action, user_note = confirm_redaction_diff(diff)
+        diff_path = (
+            _resolve_report_dir(state.get("config", {})) / "redaction-diff-preview.diff"
+        )
+        action, user_note = confirm_redaction_diff(diff, diff_path)
 
         audit_events = append_audit_event(
             audit_events,
@@ -272,8 +279,8 @@ def package_node(state: InkFlowState) -> dict:
     article_data = state["article_data"]
     final_document = package_astro_markdown(article_data)
 
-    print("=== Astro Markdown ===")
-    print(final_document)
+    log_section("Astro Markdown")
+    log_item("结果", "已拼装，稍后写入本地审阅稿，并在报告中保留完整内容。")
 
     return {
         "final_document": final_document,

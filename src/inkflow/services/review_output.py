@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from inkflow.console_log import log_item, log_message, log_section
 from inkflow.services.console_input import read_user_input
 
 
@@ -36,13 +37,13 @@ def review_generated_draft(review_path: Path) -> tuple[str, str]:
     第二个返回值用于保存“其它内容”这种重新生成建议。
     """
 
-    print("=== Review Draft ===")
-    print(f"已生成审阅稿：{review_path}")
-    print("y：接受并进入发布")
-    print("d：回到脱敏阶段")
-    print("g：回到生成阶段")
-    print("s：停止流程")
-    print("其它内容：作为修改建议回到生成阶段")
+    log_section("Review Draft")
+    log_item("审阅稿", review_path)
+    log_message("y：接受并进入发布")
+    log_message("d：回到脱敏阶段")
+    log_message("g：回到生成阶段")
+    log_message("s：停止流程")
+    log_message("其它内容：作为修改建议回到生成阶段")
 
     user_input = read_user_input("你的选择：")
     lowered_input = user_input.lower()
@@ -79,4 +80,3 @@ def _next_available_path(path: Path) -> Path:
             return candidate
 
     raise RuntimeError(f"无法为审阅稿找到可用文件名：{path}")
-

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from inkflow.console_log import log_item, log_section
 from inkflow.llm import (
     DEFAULT_LLM_CONFIG_PATH,
     call_llm,
@@ -60,8 +61,8 @@ def generate_article_data(
                 raise RuntimeError("模型连续追问超过 3 次，已停止文章生成以避免无限循环。")
 
             question = _string_value(response_data.get("question"), "请补充这篇文章的写作方向：")
-            print("=== Article Question ===")
-            print(question)
+            log_section("Article Question")
+            log_item("问题", question)
             answer = read_user_input("你的回答：")
             qa_history.append({"question": question, "answer": answer})
             continue

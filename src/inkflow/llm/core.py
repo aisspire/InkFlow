@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NotRequired, Sequence, TypedDict
 
+from inkflow.console_log import log_llm_thinking
+
 
 DEFAULT_LLM_CONFIG_PATH = Path("llm.toml")
 SUPPORTED_PROVIDER = "openai-compatible"
@@ -147,6 +149,7 @@ def call_llm(
     if active_config.max_tokens is not None:
         optional_params["max_tokens"] = active_config.max_tokens
 
+    log_llm_thinking()
     response = client.chat.completions.create(
         model=active_config.model,
         messages=list(messages),
