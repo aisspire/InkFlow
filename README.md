@@ -49,7 +49,7 @@ pip install -e .
   -> 基础预处理
   -> 生成脱敏审查方案
   -> 终端逐条确认
-  -> 必要时执行脱敏并展示 diff
+  -> 必要时执行脱敏并写入本地 diff 预览文件
   -> 重新复查脱敏结果
   -> 生成结构化文章 JSON
   -> 拼装 Astro Markdown
@@ -62,9 +62,13 @@ pip install -e .
 
 ## 终端交互
 
+终端日志统一使用 `[InkFlow]` 分组和 `- 字段：值` 的格式。为了避免把长正文或敏感内容直接打到屏幕上，终端只展示状态、数量、路径和操作提示；完整原文、diff、最终 Markdown、发布命令返回等内容请到本地 `reviews/` 或 `reports/` 文件中查看。
+
+每次真实调用 LLM 前，终端会输出 `[InkFlow] 正在思考中…`。这表示程序已经进入模型请求阶段，可能需要等待一段时间。
+
 ### 脱敏方案审查
 
-程序会展示 LLM 发现的敏感项，包括风险等级、行号、问题、原因、原文片段和建议。
+程序会展示 LLM 发现的敏感项摘要，包括风险等级、行号、问题、原因和建议。原文片段不会在终端直接输出，完整 findings 会写入本地报告。
 
 - `s`：停止流程，进入报告节点。
 - `n`：忽略当前敏感项，不执行修改。
@@ -78,7 +82,7 @@ pip install -e .
 
 ### 脱敏 diff 确认
 
-当存在需要执行的脱敏决策时，程序会让 LLM 返回完整改写文本，并展示 unified diff。
+当存在需要执行的脱敏决策时，程序会让 LLM 返回完整改写文本，并把 unified diff 写入 `report.dir` 下的 `redaction-diff-preview.diff`。终端只提示本地文件路径，不直接展示 diff 原文。
 
 - `y`：接受本次修改，并回到脱敏方案节点重新复查。
 - `n`：不接受本次 diff，按原决策重新尝试。
@@ -131,7 +135,7 @@ dir = "reports"
 - `blog.content_dir`：博客仓库内的 Astro 内容根目录。发布时会在这个目录下创建文章 slug 文件夹，并写入 `index.mdx`。
 - `publish.build_command`：复制文章后执行的构建检查命令。留空时跳过构建检查，只执行 `git add`、`git commit` 和 `git push`。
 - `publish.commit_message_template`：发布提交信息模板，可使用 `{title}`。
-- `report.dir`：报告输出目录。相对路径按配置文件所在目录解析。
+- `report.dir`：报告输出目录，也会保存脱敏 diff 预览文件。相对路径按配置文件所在目录解析。
 
 ## LLM 配置
 
@@ -166,12 +170,13 @@ Astro frontmatter 中的 `tags` 和 `authors` 会输出为单行数组，例如 
 - `reports/<run_id>.jsonl`：完整审计事件，每行一条 JSON。
 - `reports/<run_id>.md`：人类可读的流程报告。
 
-报告会保存敏感内容、脱敏方案、用户选择、LLM 输出、diff、最终 Markdown、发布目标路径和命令返回结果。`reports/` 和 `reviews/` 可能包含不适合公开的内容，提交公开仓库前请人工确认，不要把敏感审计记录、审阅稿或真实博客发布日志提交出去。
+报告会保存敏感内容、脱敏方案、用户选择、LLM 输出、diff、最终 Markdown、发布目标路径和命令返回结果。终端日志会尽量只输出摘要和本地路径，但 `reports/`、`reviews/` 以及 `report.dir/redaction-diff-preview.diff` 仍可能包含不适合公开的内容，提交公开仓库前请人工确认，不要把敏感审计记录、审阅稿、diff 预览或真实博客发布日志提交出去。
 
 ## 项目结构
 
 ```text
 src/inkflow/main.py              命令行入口，读取配置和输入文件
+src/inkflow/console_log.py       终端日志格式和敏感内容隐藏提示
 src/inkflow/graphs/minimal.py    LangGraph 节点和路由
 src/inkflow/state/workflow.py    工作流共享状态类型
 src/inkflow/services/            脱敏、文章生成、包装、审阅、发布、报告等服务
