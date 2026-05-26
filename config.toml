@@ -15,3 +15,6 @@ commit_message_template = "publish: {title}"
 
 [report]
 dir = "reports"
+
+[github.app]
+secret = "ink-flow-W3Eehumj9dCGFYGXdUvKi89J9QJbzOKXxl9H0ebewAZByGumHQr8ia8hzGgdG0hy"
