@@ -33,6 +33,24 @@ BUFFER_SIZE = 4096
 #
 
 
+def recv_exact(connection: socket.socket,size: int) -> bytes:
+    """精确接收指定字节数的数据。
+
+    recv() 不保证一次读够 size 个字节，所以这里用 while 循环反复读。
+    如果客户端中途断开，recv() 会返回空 bytes：b""。
+    """
+    chunks: list[bytes] = []
+    remaining = size
+
+    while remaining > 0:
+        chunk = connection.recv(min(BUFFER_SIZE,remaining))
+        if not chunk:
+            raise ConnectionError("客户端在消息接收完成前断开连接")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+    
+
 def handle_message(message: str) -> str:
     """处理客户端发来的文本，并返回要回复的文本。
 
@@ -77,14 +95,15 @@ def run_server(host: str = HOST, port: int = PORT) -> None:
             with connection:
                 print(f"[listener] 客户端已连接：{address}")
 
-                # 网络上传输的是 bytes，不是 str。
-                # recv() 会读取客户端发来的原始字节。
-                data = connection.recv(BUFFER_SIZE)
-                if not data:
-                    print("[listener] 客户端未发送数据，连接已结束。")
-                    continue
+                # 先读取 4 个字节的消息长度。
+                header = recv_exact(connection, 4)
 
-                # 按 UTF-8 把 bytes 转成 Python 字符串。
+                # big 表示按“大端序”把 bytes 转成整数。
+                message_size = int.from_bytes(header, byteorder="big")
+
+                # 再按长度读取完整正文。
+                data = recv_exact(connection, message_size)
+
                 message = data.decode("utf-8")
                 print(f"[listener] 收到消息：{message}")
 
@@ -105,3 +124,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
