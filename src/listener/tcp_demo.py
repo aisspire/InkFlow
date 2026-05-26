@@ -26,13 +26,7 @@ BUFFER_SIZE = 4096
 
 # 最大消息限制，防止恶意传输
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
-#python -c "
-# import socket; 
-# s=socket.create_connection(('127.0.0.1', 8674)); 
-# s.sendall('hello listener'.encode('utf-8')); 
-# print(s.recv(4096).decode('utf-8')); 
-# s.close()"
-#
+# python -c "import socket; text='hello listener'; data=text.encode('utf-8'); s=socket.create_connection(('127.0.0.1', 8674)); s.sendall(len(data).to_bytes(4, byteorder='big')); s.sendall(data); print(s.recv(4096).decode('utf-8')); s.close()"
 
 
 def recv_exact(connection: socket.socket,size: int) -> bytes:
@@ -94,26 +88,37 @@ def run_server(host: str = HOST, port: int = PORT) -> None:
 
             # connection 是本次客户端连接对应的新 socket。
             # address 通常是 (客户端 IP, 客户端临时端口)。
+            
+
+            
+            
             with connection:
                 print(f"[listener] 客户端已连接：{address}")
 
-                # 先读取 4 个字节的消息长度。
-                header = recv_exact(connection, 4)
+                try:
+                    # 先读取 4 个字节的消息长度。
+                    header = recv_exact(connection, 4)
 
-                # big 表示按“大端序”把 bytes 转成整数。
-                message_size = int.from_bytes(header, byteorder="big")
-                if message_size > MAX_MESSAGE_SIZE:
-                    raise ValueError(f"消息过大：{message_size} bytes")
-                # 再按长度读取完整正文。
-                data = recv_exact(connection, message_size)
+                    # big 表示按“大端序”把 bytes 转成整数。
+                    message_size = int.from_bytes(header, byteorder="big")
+                    if message_size <= 0:
+                        raise ValueError(f"消息长度不合法：{message_size}")
 
-                message = data.decode("utf-8")
-                print(f"[listener] 收到消息：{message}")
+                    if message_size > MAX_MESSAGE_SIZE:
+                        raise ValueError(f"消息过大：{message_size} bytes")
+                    # 再按长度读取完整正文。
+                    data = recv_exact(connection, message_size)
 
-                response = handle_message(message)
+                    message = data.decode("utf-8")
+                    print(f"[listener] 收到消息：{message}")
 
-                # 回复前要再把 Python 字符串编码回 bytes。
-                connection.sendall(response.encode("utf-8"))
+                    # response = handle_message(message)
+
+                    # # 回复前要再把 Python 字符串编码回 bytes。
+                    # connection.sendall(response.encode("utf-8"))
+                except(ConnectionError, UnicodeDecodeError, ValueError) as error:
+                    print(f"[listener] 本次连接无效，已跳过：{error}")
+                    continue
 
 
 def main() -> None:

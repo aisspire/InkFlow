@@ -16,7 +16,7 @@
       "name": "Run Listener",
       "type": "debugpy",
       "request": "launch",
-      "module": "listener.tcp_demo",
+      "module": "listener.github_handler",
       "cwd": "${workspaceFolder}",
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"
