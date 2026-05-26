@@ -24,6 +24,8 @@ PORT = 8674
 # 第一版 demo 每个连接只读取一次消息，所以先给一个足够学习用的大小。
 BUFFER_SIZE = 4096
 
+# 最大消息限制，防止恶意传输
+MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 #python -c "
 # import socket; 
 # s=socket.create_connection(('127.0.0.1', 8674)); 
@@ -100,7 +102,8 @@ def run_server(host: str = HOST, port: int = PORT) -> None:
 
                 # big 表示按“大端序”把 bytes 转成整数。
                 message_size = int.from_bytes(header, byteorder="big")
-
+                if message_size > MAX_MESSAGE_SIZE:
+                    raise ValueError(f"消息过大：{message_size} bytes")
                 # 再按长度读取完整正文。
                 data = recv_exact(connection, message_size)
 
