@@ -8,7 +8,7 @@ from typing import Any
 HOST = "127.0.0.1"
 PORT = 8674
 CONFIG_PATH = Path("config.toml")
-
+# cf->本机，需是http
 
 def load_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
     """读取项目配置文件。
