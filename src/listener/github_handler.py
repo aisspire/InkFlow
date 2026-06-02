@@ -1,4 +1,5 @@
 import json
+import os
 import tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 HOST = "127.0.0.1"
 PORT = 8674
 CONFIG_PATH = Path("config.toml")
+ENV_PATH = Path(".env")
 # cf->本机，需是http
 
 def load_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
@@ -25,10 +27,37 @@ def load_config(config_path: Path = CONFIG_PATH) -> dict[str, Any]:
         return tomllib.load(config_file)
 
 
+def load_env_file(env_path: Path = ENV_PATH) -> None:
+    """读取本地 .env 文件，把 KEY=VALUE 写入当前进程环境变量。
+
+    这里故意只支持最常见的 dotenv 写法，避免为了一个 webhook secret
+    引入额外依赖。系统里已经存在的环境变量优先级更高，不会被 .env 覆盖。
+    """
+
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+
+        os.environ.setdefault(key, value.strip().strip("'\""))
+
+
 def load_github_secret(config: dict[str, Any]) -> str:
     """从配置中读取 GitHub App webhook secret。
 
-    config.toml 中的结构是：
+    优先读取环境变量或 .env 中的：
+
+        GITHUB_WEBHOOK_SECRET="..."
+
+    旧的 config.toml 结构仍保留为兼容 fallback：
 
         [github.app]
         secret = "..."
@@ -36,6 +65,10 @@ def load_github_secret(config: dict[str, Any]) -> str:
     注意：secret 用来校验 GitHub webhook 签名，不能打印到终端。
     这一版先只加载它，下一步再接入签名校验。
     """
+
+    env_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "").strip()
+    if env_secret:
+        return env_secret
 
     github_config = config.get("github", {})
     if not isinstance(github_config, dict):
@@ -117,15 +150,16 @@ class GitHubWebhookHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    load_env_file()
     config = load_config()
     GitHubWebhookHandler.github_secret = load_github_secret(config)
 
     server = HTTPServer((HOST, PORT), GitHubWebhookHandler)
     print(f"[webhook] 正在监听 http://{HOST}:{PORT}")
     if GitHubWebhookHandler.github_secret:
-        print("[webhook] 已从 config.toml 加载 GitHub webhook secret。")
+        print("[webhook] 已从环境变量或 .env 加载 GitHub webhook secret。")
     else:
-        print("[webhook] 未从 config.toml 读取到 GitHub webhook secret。")
+        print("[webhook] 未读取到 GitHub webhook secret，请检查 .env 中的 GITHUB_WEBHOOK_SECRET。")
     server.serve_forever()
 
 

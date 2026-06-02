@@ -4,3 +4,9 @@ llm.toml
 docs/
 reviews/
 reports/
+.env
+.env.local
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
