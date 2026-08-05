@@ -10,3 +10,6 @@ reports/
 !.env.example
 .dev.vars
 .dev.vars.*
+AGENTS.md
+.codegraph
+implementation-notes.md
