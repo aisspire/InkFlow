@@ -94,9 +94,9 @@ class InkFlowState(TypedDict):
     review_action: NotRequired[str]
     approved: NotRequired[bool]
 
-    # 发布阶段和报告阶段的数据。
-    publish_path: NotRequired[str]
-    publish_log: NotRequired[list[dict[str, Any]]]
+    # blog 生产输出和报告阶段的数据。
+    # review_path 仍然保留，表示本地人工审阅稿；blog_path 表示最终落盘文件。
+    blog_path: NotRequired[str]
     report_path: NotRequired[str]
     report_jsonl_path: NotRequired[str]
     audit_events: NotRequired[list[dict[str, Any]]]
@@ -109,3 +109,19 @@ class InkFlowState(TypedDict):
 
     # 流程中收集的非致命提示信息。
     warnings: NotRequired[list[str]]
+
+    # Web 与 CLI 共用的可恢复人工步骤。密钥只能在 runtime 中，不能放在这里。
+    run_id: NotRequired[str]
+    next_node: NotRequired[str]
+    candidate_text: NotRequired[str]
+    redaction_instruction: NotRequired[str]
+    question: NotRequired[str]
+    qa_history: NotRequired[list[dict[str, str]]]
+    degraded: NotRequired[bool]
+    revision: NotRequired[int]
+    publish_preview: NotRequired[dict[str, Any]]
+    failure: NotRequired[str]
+    stopped: NotRequired[bool]
+
+    editor_bound: NotRequired[bool]
+    checked_text: NotRequired[str]

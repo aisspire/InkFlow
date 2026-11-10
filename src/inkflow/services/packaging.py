@@ -4,7 +4,34 @@
 这样可以避免 LLM 自由发挥 frontmatter 格式，后续发布和报告也更容易追踪。
 """
 
+import json
+import re
+
 from inkflow.state import ArticleData
+
+
+def parse_generated_document(document: str, article: dict) -> dict:
+    """读取本应用生成的 JSON 值 frontmatter；不充当通用 YAML 解析器。"""
+    if not isinstance(document, str) or len(document) > 1_100_000:
+        raise ValueError('请提交有效的工作流文章，正文最多 100 万字符。')
+    match = re.match(r'\A\ufeff?---\r?\n(.*?)\r?\n---\r?\n([\s\S]*)\Z', document, re.DOTALL)
+    if not match:
+        raise ValueError('请保留工作流生成稿顶部的元数据区。')
+    fields = {}
+    required = {'title', 'description', 'date', 'tags', 'authors', 'draft'}
+    for line in match[1].splitlines():
+        if not line.strip():
+            continue
+        key, separator, value = line.partition(':')
+        if not separator or key not in required or key in fields:
+            raise ValueError('元数据字段无效或重复，请使用生成稿原有字段，slug 可在文章属性中修改。')
+        try:
+            fields[key] = json.loads(value)
+        except ValueError:
+            raise ValueError('元数据字符串请使用双引号，列表保留方括号；也可在文章属性中编辑。') from None
+    if fields.keys() != required:
+        raise ValueError('生成稿的元数据字段不完整，请保留标题、摘要、日期、标签、作者和草稿标记。')
+    return {**article, **fields, 'body': match[2]}
 
 
 def package_astro_markdown(article: ArticleData) -> str:
@@ -35,7 +62,8 @@ def package_astro_markdown(article: ArticleData) -> str:
 def _escape_frontmatter_string(value: object) -> str:
     """对 frontmatter 双引号字符串做最小转义。"""
 
-    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+    # JSON 双引号转义也是合法 YAML，能处理换行而不引入额外字段。
+    return json.dumps(str(value), ensure_ascii=False)[1:-1]
 
 
 def _format_inline_array(values: list[object]) -> str:
@@ -43,7 +71,7 @@ def _format_inline_array(values: list[object]) -> str:
 
     if not values:
         return "[]"
-    return "[" + ", ".join(f"'{_escape_inline_array_string(value)}'" for value in values) + "]"
+    return json.dumps([str(value) for value in values], ensure_ascii=False)
 
 
 def _escape_inline_array_string(value: object) -> str:

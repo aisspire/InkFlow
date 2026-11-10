@@ -1,7 +1,13 @@
 .agents/
 __pycache__
 llm.toml
-docs/
+docs/*
+!docs/index.md
+!docs/workbench-and-workflows.md
+!docs/technology-decisions.md
+!docs/inkflow-architecture/
+docs/inkflow-architecture/*
+!docs/inkflow-architecture/*.md
 reviews/
 reports/
 .env
@@ -13,3 +19,7 @@ reports/
 AGENTS.md
 .codegraph
 implementation-notes.md
+.inkflow/
+node_modules/
+frontend/dist/
+*.tsbuildinfo

@@ -1,594 +1,291 @@
-"""InkFlow 的最小 LangGraph 工作流。
+"""Web 与 CLI 共用的 LangGraph 工作流。
 
-这个文件会刻意保持简单，当前包含四个节点：
-
-1. preprocess_node：清洗输入文本。
-2. redaction_plan_node：生成脱敏审查方案。
-3. redaction_review_node：让用户逐条确认脱敏方案。
-4. apply_redaction_node：执行用户确认的脱敏修改并展示 diff。
-5. article_generation_node：生成结构化文章 JSON。
-6. package_node：拼装 Astro Markdown。
-7. write_review_node：写入本地审阅稿并收集用户选择。
-8. publish_node：发布到静态博客仓库。
-9. report_node：写入完整流程报告。
-
-后续可以逐步把这些占位逻辑替换成真正的 LLM、RAG 和审核逻辑。
+每个模型调用、人工 interrupt 和文件写入都有独立节点。恢复 interrupt 时，
+LangGraph 会重入等待节点，但不会重做前一个节点的模型调用或文件写入。
+节点只返回状态增量；真实节点和条件边也直接用于前端流程图。
 """
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Callable
+from uuid import uuid4
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.config import get_stream_writer
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
-from inkflow.console_log import log_hidden_content, log_item, log_message, log_section
-from inkflow.services.audit import append_audit_event
+from inkflow.actions import validate_action
 from inkflow.services.article import build_placeholder_article, generate_article_data
-from inkflow.services.console_review import confirm_redaction_diff, review_redaction_findings
-from inkflow.services.draft import build_placeholder_draft, generate_draft
+from inkflow.services.audit import append_audit_event
+from inkflow.services.local_files import atomic_write
 from inkflow.services.packaging import package_astro_markdown
-from inkflow.services.publish import publish_reviewed_draft
-from inkflow.services.redaction import (
-    apply_redaction_with_llm,
-    build_text_diff,
-    generate_redaction_findings,
-)
-from inkflow.services.report import build_run_id, write_audit_jsonl, write_markdown_report
-from inkflow.services.review_output import review_generated_draft, write_review_file
+from inkflow.services.publish import preview_blog_target, write_final_blog_article
+from inkflow.services.redaction import apply_redaction_with_llm, build_text_diff, generate_redaction_findings
+from inkflow.services.report import write_audit_jsonl, write_markdown_report
+from inkflow.settings import SettingsStore, resolve_directory
 from inkflow.state import InkFlowState
+from inkflow.runtime import WorkflowRuntime
+
+
+# 布局只描述展示位置，不允许浏览器编辑图。边来自实际编译的图。
+NODE_META = {
+    "preprocess": ("预处理", "文章工作台保留原文；兼容 CLI 的旧清洗规则。", 0, 0),
+    "redaction_plan": ("脱敏方案", "分析敏感内容，生成带行号的审核建议。", 1, 0),
+    "redaction_review": ("人工审核", "逐项采用、忽略或自定义修改方案。", 2, 0),
+    "apply_redaction": ("执行改写", "只按已确认方案改写，一次调用对应一次执行。", 2, 1),
+    "diff_review": ("确认差异", "查看改写 diff；接受后复查，也可以补充建议重试。", 1, 1),
+    "article_generation": ("文章生成", "生成结构化文章；失败会明确标记占位结果。", 0, 1),
+    "article_question": ("补充信息", "回答模型追问，每轮生成最多三次。", 0, 2),
+    "package": ("Markdown 拼装", "统一拼装元数据和正文，产生新的文章版本。", 1, 2),
+    "write_review": ("保存审阅稿", "落盘当前文档并计算博客目标与覆盖信息。", 2, 2),
+    "final_review": ("编辑与审阅", "显式保存编辑后可结束、写入博客或退回上游。", 2, 3),
+    "publish": ("写入博客", "核对目标后仅写入 <slug>/index.mdx。", 1, 3),
+    "report": ("生成报告", "保存 Markdown 报告与完整 JSONL 审计记录。", 0, 3),
+}
+
+# 所有节点都使用条件边，包括停止和失败出口；避免 Command 与静态边并行推进。
+ROUTES = {
+    "preprocess": ["redaction_plan", "report"],
+    "redaction_plan": ["redaction_review", "report"],
+    "redaction_review": ["apply_redaction", "article_generation", "report"],
+    "apply_redaction": ["diff_review", "report"],
+    "diff_review": ["redaction_plan", "apply_redaction", "report"],
+    "article_generation": ["article_question", "package", "report"],
+    "article_question": ["article_generation", "report"],
+    "package": ["write_review", "report"],
+    "write_review": ["final_review", "report"],
+    "final_review": ["package", "publish", "redaction_plan", "article_generation", "report"],
+    "publish": ["report"],
+    "report": [END],
+}
+
+INPUT_FIELDS = {
+    "preprocess": ["raw_text"], "redaction_plan": ["clean_text", "redacted_text"],
+    "redaction_review": ["redaction_findings"],
+    "apply_redaction": ["redacted_text", "clean_text", "redaction_decisions", "redaction_instruction"],
+    "diff_review": ["candidate_text", "redaction_diff"],
+    "article_generation": ["redacted_text", "clean_text", "article_feedback", "qa_history"],
+    "article_question": ["question", "qa_history"], "package": ["article_data"],
+    "write_review": ["final_document", "revision"],
+    "final_review": ["article_data", "revision", "publish_preview"],
+    "publish": ["final_document", "publish_preview", "approved"],
+    "report": ["review_status", "review_path", "blog_path", "warnings", "failure"],
+}
+
+
+def _source(state: InkFlowState) -> str:
+    if "redacted_text" in state:
+        return state["redacted_text"]
+    return state.get("clean_text", state["raw_text"])
+
+
+def _stopped() -> dict:
+    return {"stopped": True, "approved": False, "review_status": "stopped_by_user", "next_node": "report"}
+
+
+def _wait(kind: str, **data) -> dict:
+    payload = {"kind": kind, "node": kind, **data}
+    # interrupt 必须原样抛给 LangGraph，不能被普通的错误降级逻辑吞掉。
+    response = interrupt(payload)
+    return validate_action(payload, response["action"], response.get("payload", {}))
 
 
 def preprocess_node(state: InkFlowState) -> dict:
-    """在生成草稿前清洗原始输入。
-
-    LangGraph 的节点本质上就是一个 Python 函数。
-    它接收当前状态，然后返回自己想更新的字段。
-    """
-
-    raw_text = state["raw_text"]
-    warnings = list(state.get("warnings", []))
-
-    # 第一版先保持简单：去掉首尾空白，并处理空输入。
-    clean_text = raw_text.strip()
-    if not clean_text:
-        warnings.append("输入内容为空，后续草稿只能生成占位内容。")
-        clean_text = "（空输入）"
-
-    # 这里先放一个很小的敏感信息替换示例。
-    # 后续可以把它升级成独立的规则列表或正则模块。
-    clean_text = clean_text.replace("密码", "***")
-    clean_text = clean_text.replace("password", "***")
-
-    return {
-        "clean_text": clean_text,
-        "warnings": warnings,
-    }
-
-
-def draft_node(state: InkFlowState) -> dict:
-    """根据清洗后的文本生成第一版草稿。
-
-    节点只负责从状态里读取 clean_text，并把生成结果写回 draft。
-    至于草稿是由真实 LLM 生成，还是降级为本地临时草稿，
-    这些业务细节交给 draft.py 处理。
-    """
-
-    # 如果前面已经完成脱敏，后续草稿必须优先使用 redacted_text，
-    # 避免复查通过后又把原始 clean_text 带入生成阶段。
-    clean_text = state.get("redacted_text") or state["clean_text"]
-    warnings = list(state.get("warnings", []))
-
-    try:
-        draft = generate_draft(clean_text)
-    except Exception as error:
-        warnings.append(f"草稿生成失败，已降级为本地临时草稿：{error}")
-        draft = build_placeholder_draft(clean_text)
-
-    return {
-        "draft": draft,
-        "warnings": warnings,
-    }
-
-
-def redaction_plan_node(state: InkFlowState) -> dict:
-    """生成脱敏审查方案。
-
-    这个节点先不做终端交互，只把 LLM 发现的敏感项写入状态。
-    后续 Task 4 会新增人工逐条确认节点，再决定是否真的执行脱敏。
-    """
-
-    text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
-    findings = generate_redaction_findings(text)
-
-    log_section("Redaction Findings")
-    if findings:
-        log_item("数量", len(findings))
-        log_hidden_content("详情")
-    else:
-        log_message("未发现需要人工处理的敏感项。")
-
-    return {
-        "redaction_findings": findings,
-        "audit_events": append_audit_event(
-            state.get("audit_events"),
-            "redaction_plan",
-            "llm_findings",
-            {"findings": findings},
-        ),
-    }
+    clean = state["raw_text"] if state.get("editor_bound") else state["raw_text"].strip().replace("密码", "***").replace("password", "***")
+    return {"clean_text": clean or "（空输入）", "run_id": state.get("run_id") or uuid4().hex,
+            "approved": False, "review_status": "processing", "next_node": "redaction_plan"}
 
 
 def redaction_review_node(state: InkFlowState) -> dict:
-    """让用户在终端里逐条审查脱敏方案。
-
-    这个节点只收集用户决策，不直接改写原文。
-    真正的脱敏执行会在后续节点里根据 redaction_decisions 完成。
-    """
-
-    status, decisions = review_redaction_findings(state.get("redaction_findings", []))
-    if status == "stop":
-        review_status = "stopped_by_user"
-    elif decisions:
-        review_status = "pending_redaction"
-    else:
-        review_status = "redaction_reviewed"
-
-    return {
-        "review_status": review_status,
-        "redaction_decisions": decisions,
-        "audit_events": append_audit_event(
-            state.get("audit_events"),
-            "redaction_review",
-            "user_decisions",
-            {"status": review_status, "decisions": decisions},
-        ),
-    }
+    choice = _wait("redaction_review", findings=state.get("redaction_findings", []),
+                   llm_enabled=state.get("config", {}).get("llm", {}).get("enabled", False))
+    if choice["action"] == "stop":
+        return _stopped()
+    decisions = choice["decisions"]
+    return {"redaction_decisions": decisions, "redaction_instruction": "",
+            "next_node": "apply_redaction" if any(x["action"] == "apply" for x in decisions) else "article_generation"}
 
 
-def route_after_redaction_review(state: InkFlowState) -> str:
-    """根据人工审查结果决定是否继续生成文章 JSON。
-
-    如果有需要执行的脱敏决策，就进入 apply_redaction 节点；
-    如果用户停止，则直接结束；如果没有要处理的敏感项，则继续生成文章数据。
-    """
-
-    if state.get("review_status") == "stopped_by_user":
-        return "stop"
-    if state.get("review_status") == "pending_redaction":
-        return "apply_redaction"
-    return "article_generation"
+def diff_review_node(state: InkFlowState) -> dict:
+    choice = _wait("diff_review", diff=state["redaction_diff"], candidate_text=state["candidate_text"])
+    if choice["action"] == "stop":
+        return _stopped()
+    if choice["action"] == "retry":
+        return {"redaction_instruction": choice["feedback"], "next_node": "apply_redaction"}
+    return {"redacted_text": state["candidate_text"], "next_node": "redaction_plan"}
 
 
-def apply_redaction_node(state: InkFlowState) -> dict:
-    """执行用户确认的脱敏修改，并让用户确认 diff。
-
-    这个节点内部允许多次重试：用户不满意本次 diff 时，可以输入额外建议，
-    节点会把建议传给 LLM 再改一次。用户确认后，图会回到 redaction_plan 复查。
-    """
-
-    source_text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
-    decisions = state.get("redaction_decisions", [])
-    audit_events = state.get("audit_events")
-    warnings = list(state.get("warnings", []))
-    extra_instruction = ""
-
-    while True:
-        try:
-            next_text = apply_redaction_with_llm(
-                source_text,
-                decisions,
-                extra_instruction=extra_instruction,
-            )
-        except Exception as error:
-            warnings.append(f"脱敏执行失败，流程已停止等待人工处理：{error}")
-            return {
-                "review_status": "redaction_apply_failed",
-                "warnings": warnings,
-                "audit_events": append_audit_event(
-                    audit_events,
-                    "apply_redaction",
-                    "llm_apply_failed",
-                    {"error": str(error), "decisions": decisions},
-                ),
-            }
-
-        diff = build_text_diff(source_text, next_text)
-        diff_path = (
-            _resolve_report_dir(state.get("config", {})) / "redaction-diff-preview.diff"
-        )
-        action, user_note = confirm_redaction_diff(diff, diff_path)
-
-        audit_events = append_audit_event(
-            audit_events,
-            "apply_redaction",
-            "user_diff_decision",
-            {"action": action, "user_note": user_note, "diff": diff},
-        )
-
-        if action == "accept":
-            return {
-                "redacted_text": next_text,
-                "redaction_diff": diff,
-                "review_status": "redaction_applied",
-                "audit_events": audit_events,
-            }
-
-        if action == "stop":
-            return {
-                "review_status": "stopped_by_user",
-                "audit_events": audit_events,
-            }
-
-        extra_instruction = user_note or "用户不接受本次 diff，请重新按原始决策改写。"
-
-
-def route_after_apply_redaction(state: InkFlowState) -> str:
-    """脱敏执行后决定是复查还是结束。"""
-
-    if state.get("review_status") == "redaction_applied":
-        return "recheck"
-    return "stop"
-
-
-def article_generation_node(state: InkFlowState) -> dict:
-    """生成结构化文章 JSON。
-
-    这里优先使用 redacted_text，确保已经通过复查的脱敏文本进入写作阶段。
-    如果 LLM 不可用或返回异常，则降级成本地占位文章，方便继续验证后续节点。
-    """
-
-    text = state.get("redacted_text") or state.get("clean_text") or state["raw_text"]
-    warnings = list(state.get("warnings", []))
-    audit_events = state.get("audit_events")
-    extra_instruction = state.get("article_feedback", "")
-
-    try:
-        article_data, qa_history = generate_article_data(
-            text,
-            extra_instruction=extra_instruction,
-        )
-    except Exception as error:
-        warnings.append(f"文章 JSON 生成失败，已降级为本地占位文章：{error}")
-        article_data = build_placeholder_article(text)
-        qa_history = []
-
-    audit_events = append_audit_event(
-        audit_events,
-        "article_generation",
-        "article_data_generated",
-        {
-            "article_data": article_data,
-            "qa_history": qa_history,
-            "extra_instruction": extra_instruction,
-        },
-    )
-
-    return {
-        "article_data": article_data,
-        "article_feedback": "",
-        "audit_events": audit_events,
-        "warnings": warnings,
-    }
+def article_question_node(state: InkFlowState) -> dict:
+    choice = _wait("article_question", question=state["question"],
+                   question_number=len(state.get("qa_history", [])) + 1)
+    if choice["action"] == "stop":
+        return _stopped()
+    return {"qa_history": [*state.get("qa_history", []),
+                           {"question": state["question"], "answer": choice["answer"]}],
+            "question": "", "next_node": "article_generation"}
 
 
 def package_node(state: InkFlowState) -> dict:
-    """把文章 JSON 拼装成 Astro Markdown。
+    return {"final_document": package_astro_markdown(state["article_data"]),
+            "revision": state.get("revision", 0) + 1, "approved": False, "next_node": "write_review"}
 
-    这个节点只做格式拼装，不再调用 LLM。
-    这样 frontmatter 字段、引号转义和正文边界都由程序稳定控制。
-    """
 
-    article_data = state["article_data"]
-    final_document = package_astro_markdown(article_data)
+def _directory(state: InkFlowState, name: str) -> Path:
+    config = state.get("config", {})
+    return resolve_directory(config.get(name, {}).get("dir", f"{name}s"), Path(config.get("_config_dir", ".")))
 
-    log_section("Astro Markdown")
-    log_item("结果", "已拼装，稍后写入本地审阅稿，并在报告中保留完整内容。")
 
-    return {
-        "final_document": final_document,
-        "audit_events": append_audit_event(
-            state.get("audit_events"),
-            "package",
-            "astro_markdown_packaged",
-            {"final_document": final_document},
-        ),
-    }
+def _blog(state: InkFlowState) -> tuple[Path, str]:
+    config = state.get("config", {})
+    blog = config.get("blog", {})
+    if not blog.get("repo_path"):
+        raise ValueError("未设置博客仓库路径；可先保存审阅稿并结束。")
+    return (resolve_directory(blog["repo_path"], Path(config.get("_config_dir", "."))),
+            blog.get("content_dir", "src/content/blog"))
 
 
 def write_review_node(state: InkFlowState) -> dict:
-    """写入本地审阅稿，并根据用户选择决定下一段流转。
-
-    Task 8 只负责“生成审阅稿”和“人工决定下一步”。
-    用户接受后先停在 accepted_for_publish，真正发布节点会在 Task 9 接上。
-    """
-
-    article_data = state["article_data"]
-    final_document = state["final_document"]
-    review_dir = _resolve_review_dir(state.get("config", {}))
-    review_path = write_review_file(final_document, article_data["title"], review_dir)
-    action, feedback = review_generated_draft(review_path)
-
-    approved = action == "accepted"
-    if action == "accepted" and _publish_disabled(state.get("config", {})):
-        review_status = "accepted_no_publish"
-    elif action == "accepted":
-        review_status = "accepted_for_publish"
-    elif action == "redact_again":
-        review_status = "review_returned_to_redaction"
-    elif action == "regenerate":
-        review_status = "review_returned_to_generation"
-    else:
-        review_status = "stopped_by_user"
-
-    return {
-        "review_path": str(review_path),
-        "review_action": action,
-        "article_feedback": feedback,
-        "approved": approved,
-        "review_status": review_status,
-        "audit_events": append_audit_event(
-            state.get("audit_events"),
-            "write_review",
-            "user_review_action",
-            {
-                "review_path": str(review_path),
-                "action": action,
-                "feedback": feedback,
-            },
-        ),
-    }
+    path = _directory(state, "review") / f"{state['run_id']}.md"
+    atomic_write(path, state["final_document"])
+    try:
+        repo, content = _blog(state)
+        preview = preview_blog_target(repo, content, state["article_data"].get("slug") or state["article_data"]["title"])
+    except (ValueError, OSError) as error:
+        # 博客未配置不能阻止编辑及保存审阅稿，但必须禁止确认写入。
+        preview = {"error": str(error)}
+    return {"review_path": str(path), "publish_preview": preview, "next_node": "final_review"}
 
 
-def route_after_write_review(state: InkFlowState) -> str:
-    """根据审阅选择决定回到哪一个节点。
-
-    accepted 会进入发布节点；
-    regenerate 会携带 article_feedback 回到文章生成节点；
-    redact_again 会回到脱敏方案节点重新审查。
-    """
-
-    action = state.get("review_action")
-    if action == "accepted" and _publish_disabled(state.get("config", {})):
-        return "stop"
-    if action == "accepted":
-        return "publish"
-    if action == "redact_again":
-        return "redact_again"
-    if action == "regenerate":
-        return "regenerate"
-    return "stop"
+def final_review_node(state: InkFlowState) -> dict:
+    choice = _wait("final_review", article=state["article_data"], document=state["final_document"],
+                   revision=state["revision"], publish_preview=state["publish_preview"],
+                   review_path=state["review_path"], degraded=state.get("degraded", False),
+                   no_publish=state.get("config", {}).get("publish", {}).get("no_publish", False))
+    action = choice["action"]
+    if action == "stop":
+        return _stopped()
+    if action == "save":
+        return {"article_data": choice["article"], "approved": False, "next_node": "package", "review_action": "saved"}
+    if action in {"regenerate", "redact_again"}:
+        # 退回上游立刻清除最终确认，旧版本不能成为生产节点的输入。
+        return {"approved": False, "final_document": "", "article_data": {}, "publish_preview": {},
+                "qa_history": [], "question": "", "article_feedback": choice["feedback"],
+                "review_action": action, "review_status": "processing",
+                "next_node": "article_generation" if action == "regenerate" else "redaction_plan"}
+    return {"approved": True, "review_action": action,
+            "review_status": "accepted_no_publish" if action == "finish" else "accepted_for_publish",
+            "next_node": "report" if action == "finish" else "publish"}
 
 
 def publish_node(state: InkFlowState) -> dict:
-    """把已接受的审阅稿发布到静态博客仓库。
-
-    发布动作包括复制文件、构建检查和 git 命令。
-    所有命令结果都会写入 publish_log，方便后续 Task 10 生成完整报告。
-    """
-
-    config = state.get("config", {})
-    article_data = state["article_data"]
-    warnings = list(state.get("warnings", []))
-
-    try:
-        blog_repo, content_dir, build_command, commit_message_template = (
-            _resolve_publish_config(config)
-        )
-        publish_path, publish_log = publish_reviewed_draft(
-            Path(state["review_path"]),
-            article_data["title"],
-            blog_repo,
-            content_dir,
-            build_command,
-            commit_message_template,
-            slug_source=article_data.get("slug"),
-        )
-        review_status = "published" if _publish_log_succeeded(publish_log) else "publish_failed"
-    except Exception as error:
-        warnings.append(f"发布流程失败：{error}")
-        publish_path = None
-        publish_log = [
-            {
-                "command": [],
-                "cwd": "",
-                "exit_code": 1,
-                "stdout": "",
-                "stderr": str(error),
-            }
-        ]
-        review_status = "publish_failed"
-
-    return {
-        "publish_path": str(publish_path) if publish_path is not None else "",
-        "publish_log": publish_log,
-        "review_status": review_status,
-        "warnings": warnings,
-        "audit_events": append_audit_event(
-            state.get("audit_events"),
-            "publish",
-            "publish_commands_finished",
-            {
-                "publish_path": str(publish_path) if publish_path is not None else "",
-                "publish_log": publish_log,
-                "review_status": review_status,
-            },
-        ),
-    }
+    if not state.get("approved") or state.get("config", {}).get("publish", {}).get("no_publish"):
+        raise ValueError("文章尚未确认，或本任务禁止博客写入。")
+    repo, content = _blog(state)
+    path = write_final_blog_article(state["final_document"], state["article_data"]["title"], repo, content,
+                                    slug_source=state["article_data"].get("slug"), expected=state["publish_preview"])
+    return {"blog_path": str(path), "review_status": "published", "next_node": "report"}
 
 
 def report_node(state: InkFlowState) -> dict:
-    """写入完整流程报告。
-
-    报告节点尽量作为所有出口的最后一步。
-    即使流程被用户停止、发布失败，也会保留当时已有的状态，方便复盘。
-    """
-
-    report_dir = _resolve_report_dir(state.get("config", {}))
-    run_id = build_run_id()
-    report_events = append_audit_event(
-        state.get("audit_events"),
-        "report",
-        "report_written",
-        {
-            "run_id": run_id,
-            "report_dir": str(report_dir),
-        },
-    )
-    state_for_report: InkFlowState = dict(state)
-    state_for_report["audit_events"] = report_events
-
-    audit_path = write_audit_jsonl(report_events, report_dir, run_id)
-    markdown_path = write_markdown_report(state_for_report, report_dir, run_id)
-
-    return {
-        "report_path": str(markdown_path),
-        "report_jsonl_path": str(audit_path),
-        "audit_events": report_events,
-        "warnings": state.get("warnings", []),
-        "publish_log": state.get("publish_log", []),
-        "publish_path": state.get("publish_path", ""),
-    }
+    report_dir = _directory(state, "report")
+    run_id = state["run_id"]
+    events = append_audit_event(state.get("audit_events"), "report", "report_requested",
+                                {"review_status": state.get("review_status"), "run_id": run_id})
+    snapshot = {**state, "audit_events": events}
+    # 先生成 Markdown；即使第二份写入失败，管理器仍会保留此前已产生的记录。
+    markdown = write_markdown_report(snapshot, report_dir, run_id)
+    audit = write_audit_jsonl(events, report_dir, run_id)
+    return {"report_path": str(markdown), "report_jsonl_path": str(audit), "next_node": END}
 
 
-def _resolve_publish_config(config: dict) -> tuple[Path, str, str | list[str], str]:
-    """从配置中读取发布目标和命令。
-
-    repo_path 为空时直接报错，避免用户误把内容发布到未知位置。
-    相对路径按 config.toml 所在目录解析，和 review.dir 保持一致。
-    """
-
-    blog_config = config.get("blog", {})
-    if not isinstance(blog_config, dict):
-        blog_config = {}
-    publish_config = config.get("publish", {})
-    if not isinstance(publish_config, dict):
-        publish_config = {}
-
-    repo_path_text = str(blog_config.get("repo_path", "")).strip()
-    if not repo_path_text:
-        raise ValueError("请先在 config.toml 的 [blog].repo_path 中配置静态博客仓库路径。")
-
-    repo_path = Path(repo_path_text)
-    if not repo_path.is_absolute():
-        repo_path = Path(str(config.get("_config_dir", "."))) / repo_path
-
-    content_dir = str(blog_config.get("content_dir", "src/content/blog")).strip()
-    if not content_dir:
-        raise ValueError("blog.content_dir 不能为空。")
-
-    build_command = publish_config.get("build_command", "npm run build")
-    commit_message_template = str(
-        publish_config.get("commit_message_template", "publish: {title}")
-    )
-
-    return repo_path, content_dir, build_command, commit_message_template
-
-
-def _publish_disabled(config: dict) -> bool:
-    """判断本次运行是否显式跳过发布阶段。
-
-    这个开关主要来自命令行 ``--no-publish``，用于只生成审阅稿和报告。
-    """
-
-    publish_config = config.get("publish", {})
-    if not isinstance(publish_config, dict):
-        return False
-    return bool(publish_config.get("no_publish", False))
+def _tracked(name: str, function: Callable, runtime: WorkflowRuntime):
+    def node(state: InkFlowState) -> dict:
+        writer = get_stream_writer()
+        stopping_at_report = name == "report" and runtime.stop.is_set() and not state.get("failure")
+        if stopping_at_report:
+            # 写入博客后收到停止请求也要如实标记；已写文件不回滚。
+            state = {**state, **_stopped()}
+        writer(runtime.scrub({"type": "node_started", "node": name,
+                              "input": {key: state[key] for key in INPUT_FIELDS[name] if key in state}}))
+        if runtime.stop.is_set() and name != "report":
+            writer({"type": "node_skipped", "node": name, "summary": "已在安全节点边界停止"})
+            update = _stopped()
+        else:
+            try:
+                update = function(state)
+            except GraphInterrupt:
+                raise
+            except Exception as error:
+                # 不把第三方原始异常（可能含请求/密钥）写入日志。
+                message = str(error) if isinstance(error, (ValueError, OSError)) else f"执行失败（{type(error).__name__}），请检查设置后重新运行。"
+                message = runtime.scrub(message)
+                writer({"type": "node_failed", "node": name, "summary": message})
+                update = {"failure": message, "approved": False, "review_status": f"{name}_failed",
+                          "warnings": [*state.get("warnings", []), message],
+                          "next_node": END if name == "report" else "report"}
+        update = runtime.scrub(update)
+        if stopping_at_report:
+            update = {**_stopped(), **update}
+        event_data = {key: value for key, value in update.items() if key not in {"audit_events", "next_node"}}
+        update["audit_events"] = append_audit_event(state.get("audit_events"), name, "state_updated", event_data)
+        return update
+    return node
 
 
-def _publish_log_succeeded(publish_log: list[dict[str, object]]) -> bool:
-    """判断所有已执行发布命令是否都成功。"""
+def build_graph(runtime: WorkflowRuntime | None = None):
+    if runtime is None:
+        _, llm, key = SettingsStore(Path("config.toml")).snapshot()
+        runtime = WorkflowRuntime(llm, key)
 
-    return bool(publish_log) and all(result.get("exit_code") == 0 for result in publish_log)
+    def plan(state: InkFlowState) -> dict:
+        findings = generate_redaction_findings(_source(state), config=runtime.llm, api_key=runtime.api_key)
+        return {"redaction_findings": findings, "checked_text": _source(state), "next_node": "redaction_review"}
 
+    def apply(state: InkFlowState) -> dict:
+        decisions = [x for x in state.get("redaction_decisions", []) if x["action"] == "apply"]
+        candidate = apply_redaction_with_llm(_source(state), decisions, state.get("redaction_instruction", ""),
+                                             config=runtime.llm, api_key=runtime.api_key, preserve_format=state.get('editor_bound', False))
+        return {"candidate_text": candidate, "redaction_diff": build_text_diff(_source(state), candidate),
+                "next_node": "diff_review"}
 
-def _resolve_report_dir(config: dict) -> Path:
-    """从配置中解析报告目录。"""
+    def generate(state: InkFlowState) -> dict:
+        warnings = list(state.get("warnings", []))
+        try:
+            result = generate_article_data(_source(state), extra_instruction=state.get("article_feedback", ""),
+                                           qa_history=state.get("qa_history", []), config=runtime.llm, api_key=runtime.api_key)
+        except Exception as error:
+            warnings.append(f"文章生成失败（{type(error).__name__}），已使用本地占位文章；请人工审阅。")
+            result = {"article": build_placeholder_article(_source(state)), "degraded": True}
+        if "question" in result:
+            return {"question": result["question"], "next_node": "article_question"}
+        if not runtime.llm.enabled and "模型未启用，当前为本地占位文章。" not in warnings:
+            warnings.append("模型未启用，当前为本地占位文章。")
+        return {"article_data": result["article"], "degraded": result["degraded"], "warnings": warnings,
+                "approved": False, "question": "", "next_node": "package"}
 
-    report_config = config.get("report", {})
-    if not isinstance(report_config, dict):
-        report_config = {}
-
-    report_dir = Path(str(report_config.get("dir", "reports")))
-    if report_dir.is_absolute():
-        return report_dir
-
-    config_dir = Path(str(config.get("_config_dir", ".")))
-    return config_dir / report_dir
-
-
-def _resolve_review_dir(config: dict) -> Path:
-    """从配置中解析审阅稿目录。
-
-    config.toml 里的相对路径以配置文件所在目录为基准。
-    main.py 会把这个目录写入 _config_dir，避免节点重新读取配置文件。
-    """
-
-    review_config = config.get("review", {})
-    if not isinstance(review_config, dict):
-        review_config = {}
-
-    review_dir = Path(str(review_config.get("dir", "reviews")))
-    if review_dir.is_absolute():
-        return review_dir
-
-    config_dir = Path(str(config.get("_config_dir", ".")))
-    return config_dir / review_dir
-
-
-def build_graph():
-    """构建并编译 LangGraph 工作流。
-
-    StateGraph 用来描述工作流结构。
-    compile() 会把这个结构变成可以 invoke() 执行的应用。
-    """
-
+    functions = {"preprocess": preprocess_node, "redaction_plan": plan, "redaction_review": redaction_review_node,
+                 "apply_redaction": apply, "diff_review": diff_review_node, "article_generation": generate,
+                 "article_question": article_question_node, "package": package_node, "write_review": write_review_node,
+                 "final_review": final_review_node, "publish": publish_node, "report": report_node}
     graph = StateGraph(InkFlowState)
-
-    # 把每个 Python 函数注册成一个带名字的图节点。
-    graph.add_node("preprocess", preprocess_node)
-    graph.add_node("redaction_plan", redaction_plan_node)
-    graph.add_node("redaction_review", redaction_review_node)
-    graph.add_node("apply_redaction", apply_redaction_node)
-    graph.add_node("article_generation", article_generation_node)
-    graph.add_node("package", package_node)
-    graph.add_node("draft", draft_node)
-    graph.add_node("write_review", write_review_node)
-    graph.add_node("publish", publish_node)
-    graph.add_node("report", report_node)
-
-    # 定义状态在图里的流转路线。
+    for name, function in functions.items():
+        graph.add_node(name, _tracked(name, function, runtime))
     graph.add_edge(START, "preprocess")
-    graph.add_edge("preprocess", "redaction_plan")
-    graph.add_edge("redaction_plan", "redaction_review")
-    graph.add_conditional_edges(
-        "redaction_review",
-        route_after_redaction_review,
-        {
-            "stop": "report",
-            "apply_redaction": "apply_redaction",
-            "article_generation": "article_generation",
-        },
-    )
-    graph.add_conditional_edges(
-        "apply_redaction",
-        route_after_apply_redaction,
-        {
-            "recheck": "redaction_plan",
-            "stop": "report",
-        },
-    )
-    graph.add_edge("article_generation", "package")
-    graph.add_edge("package", "write_review")
-    graph.add_conditional_edges(
-        "write_review",
-        route_after_write_review,
-        {
-            "publish": "publish",
-            "redact_again": "redaction_plan",
-            "regenerate": "article_generation",
-            "stop": "report",
-        },
-    )
-    graph.add_edge("publish", "report")
-    graph.add_edge("report", END)
+    for name, destinations in ROUTES.items():
+        graph.add_conditional_edges(name, lambda state: state["next_node"], {target: target for target in destinations})
+    return graph.compile(checkpointer=InMemorySaver())
 
-    return graph.compile()
+
+def workflow_description(graph) -> dict:
+    drawable = graph.get_graph()
+    return {
+        "nodes": [{"id": name, "label": meta[0], "description": meta[1],
+                   "position": {"x": meta[2] * 290, "y": meta[3] * 170},
+                   "human": name in {"redaction_review", "diff_review", "article_question", "final_review"}}
+                  for name, meta in NODE_META.items() if name in drawable.nodes],
+        "edges": [{"id": f"{edge.source}-{edge.target}", "source": edge.source, "target": edge.target}
+                  for edge in drawable.edges if edge.source in NODE_META and edge.target in NODE_META],
+    }

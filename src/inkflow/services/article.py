@@ -2,7 +2,7 @@
 
 LangGraph 节点只需要传入脱敏后的文本，本模块负责：
 - 调用 LLM 生成文章 JSON。
-- 在模型需要补充信息时，最多向用户追问 3 次。
+- 模型需要补充信息时返回问题，由图中独立等待节点收集回答（最多 3 次）。
 - 在 LLM 未启用时返回本地占位文章，让学习流程可以离线跑通。
 """
 
@@ -15,15 +15,14 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from inkflow.console_log import log_item, log_section
 from inkflow.llm import (
     DEFAULT_LLM_CONFIG_PATH,
     call_llm,
     is_llm_enabled,
     load_llm_config,
+    LLMConfig,
 )
 from inkflow.prompts import build_article_messages
-from inkflow.services.console_input import read_user_input
 from inkflow.state import ArticleData
 
 MAX_ARTICLE_QUESTIONS = 3
@@ -34,46 +33,34 @@ def generate_article_data(
     *,
     extra_instruction: str = "",
     config_path: Path = DEFAULT_LLM_CONFIG_PATH,
-) -> tuple[ArticleData, list[dict[str, str]]]:
-    """生成 Astro 文章所需的结构化数据。
+    config: LLMConfig | None = None,
+    api_key: str | None = None,
+    qa_history: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """只调用一次模型，返回文章或问题；等待用户由独立图节点负责。
 
-    返回值包含两部分：
-    - article：最终文章 JSON。
-    - qa_history：模型追问和用户回答，节点会把它写入审计事件。
+    把追问历史显式放入 state，浏览器和 CLI 就能恢复同一个等待步骤，
+    而不会重放之前的模型请求。
     """
 
     today = _today_string()
-    if not is_llm_enabled(config_path):
-        return build_placeholder_article(text, today=today), []
-
-    config = load_llm_config(config_path)
-    qa_history: list[dict[str, str]] = []
-
-    for _ in range(MAX_ARTICLE_QUESTIONS + 1):
-        response_text = call_llm(
-            build_article_messages(text, today, qa_history, extra_instruction),
-            config=config,
-        )
-        response_data = _parse_json_object(response_text)
-
-        if response_data.get("needs_user_input") is True:
-            if len(qa_history) >= MAX_ARTICLE_QUESTIONS:
-                raise RuntimeError("模型连续追问超过 3 次，已停止文章生成以避免无限循环。")
-
-            question = _string_value(response_data.get("question"), "请补充这篇文章的写作方向：")
-            log_section("Article Question")
-            log_item("问题", question)
-            answer = read_user_input("你的回答：")
-            qa_history.append({"question": question, "answer": answer})
-            continue
-
-        article = response_data.get("article")
-        if not isinstance(article, dict):
-            raise ValueError("模型返回的 JSON 缺少 article 对象。")
-
-        return _normalize_article(article, today), qa_history
-
-    raise RuntimeError("文章生成循环异常结束。")
+    if not (config.enabled if config else is_llm_enabled(config_path)):
+        return {"article": build_placeholder_article(text, today=today), "degraded": True}
+    config = config or load_llm_config(config_path)
+    history = qa_history or []
+    response_text = call_llm(
+        build_article_messages(text, today, history, extra_instruction),
+        config=config, api_key=api_key,
+    )
+    response_data = _parse_json_object(response_text)
+    if response_data.get("needs_user_input") is True:
+        if len(history) >= MAX_ARTICLE_QUESTIONS:
+            raise RuntimeError("模型连续追问超过 3 次，已降级为占位文章。")
+        return {"question": _string_value(response_data.get("question"), "请补充这篇文章的写作方向：")}
+    article = response_data.get("article")
+    if not isinstance(article, dict):
+        raise ValueError("模型返回的 JSON 缺少 article 对象。")
+    return {"article": _normalize_article(article, today), "degraded": False}
 
 
 def build_placeholder_article(text: str, *, today: str | None = None) -> ArticleData:

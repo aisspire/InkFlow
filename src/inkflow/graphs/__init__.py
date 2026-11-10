@@ -1,7 +1,7 @@
 """InkFlow 的图定义入口。
 
-目前只导出最小内容工作流。未来如果出现本地笔记、GitHub Release、
-新闻等多条流程，可以继续在这个包里增加新的图构建函数。
+保留既有 build_graph 导出以兼容直接调用。
+Web 与 CLI 通过 inkflow.workflows 注册表选择实际的图构建入口。
 """
 
 from inkflow.graphs.minimal import build_graph

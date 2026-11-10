@@ -9,10 +9,6 @@ dir = "reviews"
 repo_path = "E:/code/huijue.top"
 content_dir = "src/content/blog"
 
-[publish]
-build_command = ""
-commit_message_template = "publish: {title}"
-
 [report]
 dir = "reports"
 

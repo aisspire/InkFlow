@@ -131,6 +131,7 @@ def call_llm(
     *,
     config: LLMConfig | None = None,
     config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    api_key: str | None = None,
 ) -> str:
     """调用聊天模型并返回纯文本结果。
 
@@ -143,19 +144,25 @@ def call_llm(
         raise ValueError("messages 不能为空。")
 
     active_config = config or load_llm_config(config_path)
-    client = _create_openai_client(active_config)
+    client = _create_openai_client(active_config, api_key=api_key)
 
     optional_params: _ChatCompletionParams = {}
     if active_config.max_tokens is not None:
         optional_params["max_tokens"] = active_config.max_tokens
 
     log_llm_thinking()
-    response = client.chat.completions.create(
-        model=active_config.model,
-        messages=list(messages),
-        temperature=active_config.temperature,
-        **optional_params,
-    )
+    # SDK 异常可能携带服务返回的请求信息，不能直接进入历史或报告。
+    try:
+        response = client.chat.completions.create(
+            model=active_config.model,
+            messages=list(messages),
+            temperature=active_config.temperature,
+            **optional_params,
+        )
+    except Exception as error:
+        raise RuntimeError(f"模型请求失败（{type(error).__name__}），请检查连接、密钥或超时设置。") from None
+    finally:
+        client.close()
 
     content = response.choices[0].message.content
     if content is None:
@@ -164,7 +171,7 @@ def call_llm(
     return content
 
 
-def _create_openai_client(config: LLMConfig):
+def _create_openai_client(config: LLMConfig, *, api_key: str | None = None):
     """创建 OpenAI SDK 客户端。
 
     import 放在函数内部，是为了让配置读取等纯 Python 逻辑
@@ -178,7 +185,7 @@ def _create_openai_client(config: LLMConfig):
             "缺少 openai 依赖。请先安装项目依赖，例如运行：pip install -e ."
         ) from error
 
-    api_key = os.environ.get(config.api_key_env)
+    api_key = api_key if api_key is not None else os.environ.get(config.api_key_env)
     if not api_key:
         raise LLMConfigError(
             f"环境变量 {config.api_key_env!r} 未设置。"
@@ -188,6 +195,7 @@ def _create_openai_client(config: LLMConfig):
     client_kwargs: dict[str, object] = {
         "api_key": api_key,
         "timeout": config.timeout_seconds,
+        "max_retries": 0,
     }
     if config.base_url is not None:
         client_kwargs["base_url"] = config.base_url

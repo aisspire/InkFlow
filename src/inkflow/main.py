@@ -1,4 +1,4 @@
-"""用于尝试第一版 InkFlow 图的命令行入口。"""
+"""按注册工作流执行的 InkFlow 命令行入口。"""
 
 import argparse
 import sys
@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from inkflow.console_log import log_hidden_content, log_item, log_message, log_section
-from inkflow.graphs import build_graph
+from inkflow.runtime import WorkflowRuntime
+from inkflow.workflows import DEFAULT_WORKFLOW_ID, WORKFLOWS, get_workflow
+from inkflow.services.terminal import run_terminal
+from inkflow.settings import SettingsStore
 from inkflow.state import InkFlowState
 
 
@@ -36,10 +39,13 @@ def parse_args() -> argparse.Namespace:
     这里先只支持少量参数，保持入口简单：
     - --config：指定配置文件路径。
     - --input：直接指定要读取的输入文件路径。
-    - --no-publish：只生成审阅稿和报告，不执行博客发布命令。
+    - --no-publish：只生成审阅稿和报告，不写入 blog 生产目录。
+    - --workflow：选择注册的工作流，默认保留内置文章处理流程。
     """
 
-    parser = argparse.ArgumentParser(description="运行 InkFlow 最小工作流。")
+    parser = argparse.ArgumentParser(description="运行 InkFlow 注册工作流。")
+    parser.add_argument("--workflow", choices=list(WORKFLOWS), default=DEFAULT_WORKFLOW_ID,
+                        help="工作流标识，默认运行内置文章处理与审阅流程。")
     parser.add_argument(
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
@@ -52,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-publish",
         action="store_true",
-        help="只生成审阅稿和报告；即使审阅时选择发布，也不会执行复制、构建、git 提交或推送。",
+        help="只生成审阅稿和报告；即使审阅时选择发布，也不会写入 blog 生产目录。",
     )
     return parser.parse_args()
 
@@ -118,7 +124,11 @@ def main() -> None:
     input_path = resolve_input_path(args, config)
     raw_text = read_input_text(input_path)
 
-    app = build_graph()
+    # 任务开始时冻结模型、目录及密钥；运行中修改设置只影响下一次任务。
+    snapshot, llm, key = SettingsStore(Path(args.config)).snapshot(no_publish=args.no_publish)
+    config = snapshot
+    runtime = WorkflowRuntime(llm, key)
+    app = get_workflow(args.workflow).build_graph(runtime)
 
     # 这是传入图的初始状态。
     # 后续 raw_text 可以来自 Markdown 文件、RSS 条目或 GitHub Release。
@@ -134,17 +144,23 @@ def main() -> None:
         "warnings": [],
     }
 
-    # invoke() 会让图从 START 跑到 END，并返回最终状态。
-    final_state = app.invoke(initial_state)
+    # 与 Web 使用同一个图；终端适配器负责 interrupt 的提问和 resume。
+    final_state = run_terminal(app, runtime.scrub(initial_state))
 
     report_path = final_state.get("report_path")
 
-    log_section("Review Status")
-    log_item("状态", final_state["review_status"])
+    log_section("Workflow Status")
+    status = ("failed" if final_state.get("failure") else "stopped" if final_state.get("stopped")
+              else final_state.get("review_status", "completed"))
+    log_item("状态", status)
+    if final_state.get("failure"):
+        log_message(final_state["failure"])
     print()
 
-    log_section("Final Document")
-    if "final_document" in final_state:
+    log_section("Check Result" if args.workflow == "full-check" else "Final Document")
+    if args.workflow == "full-check":
+        log_item("检查建议", len(final_state.get("suggestions", [])))
+    elif "final_document" in final_state:
         log_hidden_content(
             "最终文档",
             path=final_state.get("review_path") or report_path,
@@ -162,24 +178,11 @@ def main() -> None:
         log_message("未生成审阅文件。")
     print()
 
-    log_section("Publish Path")
-    if "publish_path" in final_state and final_state["publish_path"]:
-        log_item("发布文件", final_state["publish_path"])
+    log_section("Blog Path")
+    if "blog_path" in final_state and final_state["blog_path"]:
+        log_item("生产文件", final_state["blog_path"])
     else:
-        log_message("未发布到博客仓库。")
-    print()
-
-    log_section("Publish Log")
-    publish_log = final_state.get("publish_log", [])
-    if publish_log:
-        for index, item in enumerate(publish_log, start=1):
-            exit_code = item.get("exit_code")
-            log_item(
-                f"命令 {index}",
-                f"exit_code={exit_code}，详情请查看本地报告：{report_path}",
-            )
-    else:
-        log_message("无")
+        log_message("未写入博客生产目录。")
     print()
 
     log_section("Report Path")
@@ -200,6 +203,9 @@ def main() -> None:
             log_message(warning)
     else:
         log_message("无")
+
+    if final_state.get("failure"):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

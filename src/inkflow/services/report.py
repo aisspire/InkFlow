@@ -13,6 +13,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from inkflow.state import InkFlowState
+from inkflow.services.local_files import atomic_write
 
 
 def build_run_id() -> str:
@@ -30,10 +31,7 @@ def write_audit_jsonl(
 
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"{run_id}.jsonl"
-    with report_path.open("w", encoding="utf-8") as report_file:
-        for event in events:
-            report_file.write(json.dumps(event, ensure_ascii=False, default=str))
-            report_file.write("\n")
+    atomic_write(report_path, "".join(json.dumps(event, ensure_ascii=False, default=str) + "\n" for event in events))
     return report_path
 
 
@@ -50,7 +48,7 @@ def write_markdown_report(
 
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"{run_id}.md"
-    report_path.write_text(_build_report_text(state, run_id), encoding="utf-8")
+    atomic_write(report_path, _build_report_text(state, run_id))
     return report_path
 
 
@@ -79,9 +77,9 @@ def _build_report_text(state: InkFlowState, run_id: str) -> str:
                 }
             ),
         ),
-        _text_section("发布目标路径", state.get("publish_path") or "无"),
-        _text_section("命令返回结果", _json_text(state.get("publish_log", []))),
+        _text_section("博客生产文件路径", state.get("blog_path") or "无"),
         _text_section("流程提示", _json_text(state.get("warnings", []))),
+        _text_section("文章版本与降级状态", _json_text({"revision": state.get("revision", 0), "degraded": state.get("degraded", False)})),
     ]
     return "\n".join(sections).rstrip() + "\n"
 

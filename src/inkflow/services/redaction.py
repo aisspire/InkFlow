@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from inkflow.llm import (
     DEFAULT_LLM_CONFIG_PATH,
     LLMMessage,
+    LLMConfig,
     call_llm,
     is_llm_enabled,
     load_llm_config,
@@ -35,6 +36,8 @@ def generate_redaction_findings(
     text: str,
     *,
     config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    config: LLMConfig | None = None,
+    api_key: str | None = None,
 ) -> list[RedactionFinding]:
     """生成脱敏审查 findings。
 
@@ -43,13 +46,13 @@ def generate_redaction_findings(
     明确提示后续人工介入，而不是静默进入发布流程。
     """
 
-    if not is_llm_enabled(config_path):
+    if not (config.enabled if config else is_llm_enabled(config_path)):
         return []
 
-    config = load_llm_config(config_path)
+    config = config or load_llm_config(config_path)
     numbered_text = add_line_numbers(text)
     try:
-        response_text = call_llm(build_redaction_messages(numbered_text), config=config)
+        response_text = call_llm(build_redaction_messages(numbered_text), config=config, api_key=api_key)
     except Exception as error:
         return [_build_generation_error_finding(error)]
 
@@ -62,7 +65,10 @@ def generate_redaction_findings(
     for index, raw_finding in enumerate(raw_findings, start=1):
         if not isinstance(raw_finding, dict):
             return [_build_invalid_json_finding(response_text)]
-        findings.append(_normalize_finding(raw_finding, index))
+        finding = _normalize_finding(raw_finding, index)
+        # 模型 ID 不保证唯一，审核表单使用程序生成的稳定序号。
+        finding["id"] = f"S{index:03d}"
+        findings.append(finding)
 
     return findings
 
@@ -73,6 +79,9 @@ def apply_redaction_with_llm(
     extra_instruction: str = "",
     *,
     config_path: Path = DEFAULT_LLM_CONFIG_PATH,
+    config: LLMConfig | None = None,
+    api_key: str | None = None,
+    preserve_format: bool = False,
 ) -> str:
     """根据用户确认的修改方案，让 LLM 返回修改后的完整文本。
 
@@ -83,14 +92,16 @@ def apply_redaction_with_llm(
     if not decisions:
         return text
 
-    if not is_llm_enabled(config_path):
+    if not (config.enabled if config else is_llm_enabled(config_path)):
         raise RuntimeError("LLM 未启用，无法执行需要模型改写的脱敏决策。")
 
-    config = load_llm_config(config_path)
-    return call_llm(
+    config = config or load_llm_config(config_path)
+    result = call_llm(
         _build_apply_redaction_messages(text, decisions, extra_instruction),
         config=config,
-    ).strip()
+        api_key=api_key,
+    )
+    return result if preserve_format else result.strip()
 
 
 def build_text_diff(before: str, after: str) -> str:
@@ -221,7 +232,7 @@ def _build_generation_error_finding(error: Exception) -> RedactionFinding:
         "line_end": 1,
         "original_excerpt": "",
         "issue": "脱敏方案生成失败",
-        "reason": f"模型调用失败，当前不能确认文本是否适合公开发布：{error}",
+        "reason": f"模型调用失败（{type(error).__name__}），当前不能确认文本是否适合公开发布。请检查模型设置。",
         "suggestion": "请先修复 LLM 配置或手动完成脱敏审查。",
     }
 
