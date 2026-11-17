@@ -35,6 +35,8 @@ def index(text: str, offset: int) -> int:
 
 
 class EditorService:
+    docs_table = 'editor_docs'
+    versions_table = 'editor_versions'
     def __init__(self, settings, root: Path | None = None):
         self.settings = settings
         self.root = (root or settings.root).resolve()
@@ -100,7 +102,7 @@ class EditorService:
 
     def get(self, path):
         with self.store.connection() as db:
-            row = db.execute('SELECT payload FROM editor_docs WHERE path=?', (self.identity(path),)).fetchone()
+            row = db.execute(f'SELECT payload FROM {self.docs_table} WHERE path=?', (self.identity(path),)).fetchone()
         if not row:
             raise KeyError(path)
         doc = {**json.loads(row['payload']), 'workspace': str(self.root)}
@@ -116,8 +118,9 @@ class EditorService:
     def _persist(self, doc, operation, db):
         doc['revision'] = uuid4().hex
         doc['updated_at'] = now()
-        db.execute('INSERT OR REPLACE INTO editor_docs VALUES (?,?)', (self.identity(doc['path']), encode(doc)))
-        db.execute('INSERT INTO editor_versions VALUES (?,?,?,?,?)', (doc['revision'], self.identity(doc['path']), doc['updated_at'], operation, encode(doc)))
+        key = doc.get('document_id') or self.identity(doc['path'])
+        db.execute(f'INSERT OR REPLACE INTO {self.docs_table} VALUES (?,?)', (key, encode(doc)))
+        db.execute(f'INSERT INTO {self.versions_table} VALUES (?,?,?,?,?)', (doc['revision'], key, doc['updated_at'], operation, encode(doc)))
         return doc
 
     def document_source(self, relative, revision, text):
@@ -133,7 +136,7 @@ class EditorService:
             return {'workspace': str(self.root), 'path': relative, 'revision': revision, 'text_hash': digest(text)}
 
     def _result_target(self, relative, revision, text, source, result):
-        self.path(relative)
+        self.canonical(relative)
         for value in (text, result['text']):
             self.check_secret(value)
             if len(value.encode('utf-8')) > 2_000_000:
@@ -141,8 +144,9 @@ class EditorService:
         doc = self.get(relative)
         if doc['revision'] != revision:
             raise ConflictError('文章版本已变化，请重新打开文章后对比。')
-        if source and (source['workspace'] != str(self.root) or source['path'] != relative):
-            raise ConflictError('请在原工作区打开工作流关联的文章，不能替换其它文档。')
+        if source and (source.get('document_id') != doc.get('document_id') if doc.get('document_id') else
+                       source['workspace'] != str(self.root) or source['path'] != relative):
+            raise ConflictError('请打开工作流关联的文章，不能替换其它文档。')
         return doc, not source or digest(text) != source['text_hash']
 
     def preview_result(self, relative, revision, text, source, result):
@@ -263,7 +267,7 @@ class EditorService:
                     s['status'] = 'ignored' if action == 'ignore' else 'rejected'
             elif action == 'restore':
                 with self.store.connection() as db:
-                    row = db.execute('SELECT payload FROM editor_versions WHERE id=? AND path=?', (version, self.identity(relative))).fetchone()
+                    row = db.execute(f'SELECT payload FROM {self.versions_table} WHERE id=? AND path=?', (version, self.identity(relative))).fetchone()
                 if not row:
                     raise KeyError(version)
                 restored = json.loads(row['payload'])
@@ -297,7 +301,7 @@ class EditorService:
             return self.persist(doc, action)
 
     def versions(self, relative):
-        self.path(relative)
+        self.canonical(relative)
         with self.store.connection() as db:
-            rows = db.execute('SELECT id,created_at,operation,payload FROM editor_versions WHERE path=? ORDER BY created_at DESC, rowid DESC LIMIT 200', (self.identity(relative),)).fetchall()
+            rows = db.execute(f'SELECT id,created_at,operation,payload FROM {self.versions_table} WHERE path=? ORDER BY created_at DESC, rowid DESC LIMIT 200', (self.identity(relative),)).fetchall()
         return [{**{k: r[k] for k in ('id', 'created_at', 'operation')}, 'text': json.loads(r['payload'])['text']} for r in rows]
