@@ -24,12 +24,15 @@ def resolve_blog_destination(blog_repo: Path, content_dir: str, slug: str) -> Pa
     if not repo.is_dir():
         raise ValueError(f"博客仓库目录不存在：{repo}")
     validate_content_dir(content_dir)
+    candidate = repo / content_dir
+    if any(part.is_symlink() for part in [candidate, *candidate.parents] if part != repo and part.is_relative_to(repo)):
+        raise ValueError("博客内容目录不能包含符号链接。")
     root = (repo / content_dir).resolve()
     if not root.is_relative_to(repo):
         raise ValueError("博客内容目录不能越过仓库根目录。")
     destination = root / _safe_slug(slug) / "index.mdx"
     # 不跟随 index.mdx 的符号链接，也不允许 slug 目录指向内容目录之外。
-    if destination.is_symlink() or not destination.resolve().is_relative_to(root):
+    if destination.is_symlink() or destination.parent.is_symlink() or not destination.resolve().is_relative_to(root):
         raise ValueError("博客文章目标路径越界或目标文件为符号链接。")
     if destination.exists() and not destination.is_file():
         raise ValueError("博客目标已存在且不是普通文件。")
@@ -60,6 +63,11 @@ def write_final_blog_article(
 
     # 不同文章现在可以并行运行；本进程的输出核验与替换必须作为一个临界区。
     with _OUTPUT_LOCK:
+        from inkflow.web.durable import has_effect
+        if expected and has_effect(expected['path']):
+            # Reconcile the exact previously authorized path before preview validation.
+            atomic_write(Path(expected['path']), final_document)
+            return Path(expected['path'])
         current = preview_blog_target(blog_repo, content_dir, slug_source or title)
         if expected is not None and current != expected:
             raise ValueError("目标文件已在确认后变化，未覆盖。请重新运行并检查最新目标。")

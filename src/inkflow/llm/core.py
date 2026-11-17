@@ -160,15 +160,27 @@ def call_llm(
             **optional_params,
         )
     except Exception as error:
-        raise RuntimeError(f"模型请求失败（{type(error).__name__}），请检查连接、密钥或超时设置。") from None
+        from inkflow.runtime import ModelExecutionError, error_category
+        raise ModelExecutionError(error_category(error), f"模型请求失败（{type(error).__name__}），请检查连接、密钥或超时设置。") from None
     finally:
         client.close()
 
-    content = response.choices[0].message.content
+    from inkflow.runtime import ModelExecutionError
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        raise ModelExecutionError('output_format', '模型响应缺少 choices/message/content。') from None
     if content is None:
-        raise RuntimeError("LLM 返回了空内容。")
+        raise ModelExecutionError('output_format', 'LLM 返回了空内容。')
 
-    return content
+    return LLMReply(content, response.usage.model_dump() if getattr(response, 'usage', None) else None)
+
+
+class LLMReply(str):
+    def __new__(cls, content, usage=None):
+        value = super().__new__(cls, content)
+        value.usage = usage
+        return value
 
 
 def _create_openai_client(config: LLMConfig, *, api_key: str | None = None):

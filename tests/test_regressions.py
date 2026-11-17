@@ -69,6 +69,20 @@ class CliTests(IsolatedTest):
         self.assertEqual(error.exception.code, 1)
 
 
+    def test_cli_completed_history_keeps_version_and_queryable_diagnostics(self):
+        self.run_cli()
+        store = HistoryStore(self.root / '.inkflow')
+        summary = store.list(unlinked=True)[0]
+        run = store.get(summary['id'])
+        self.assertEqual(run['status'], 'completed')
+        self.assertIsNone(run['editor_source'])
+        self.assertEqual(run['state']['run_id'], run['id'])
+        self.assertTrue(run['workflow_version'])
+        from inkflow.workflow_assets.diagnostics import DiagnosticStore
+        attempts = DiagnosticStore(store).list('run', run['id'])
+        self.assertTrue(any(a['kind'] == 'model' and a['prompt_revision'] for a in attempts))
+
+
 class AtomicWriteTests(IsolatedTest):
     def test_failed_replace_preserves_content_and_cleans_temporary(self):
         path = self.root / "article.md"

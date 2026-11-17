@@ -125,9 +125,21 @@ def main() -> None:
     raw_text = read_input_text(input_path)
 
     # 任务开始时冻结模型、目录及密钥；运行中修改设置只影响下一次任务。
-    snapshot, llm, key = SettingsStore(Path(args.config)).snapshot(no_publish=args.no_publish)
-    config = snapshot
-    runtime = WorkflowRuntime(llm, key)
+    from inkflow.workflow_assets.catalog import WorkflowCatalog
+    from inkflow.workflow_assets.diagnostics import DiagnosticStore
+    from inkflow.web.storage import HistoryStore, now
+    from uuid import uuid4
+    settings = SettingsStore(Path(args.config))
+    store = HistoryStore(settings.data_dir)
+    catalog = WorkflowCatalog(store, settings)
+    version = catalog.active(args.workflow)
+    catalog.validate(version['payload'])
+    config, llm, key = catalog.runtime_config(version, args.no_publish)
+    if args.workflow == 'redaction-only':
+        config['redaction_only'] = True
+    diagnostics = DiagnosticStore(store)
+    runtime = WorkflowRuntime(llm, key, package=version['payload'], version_id=version['id'], owner_id=uuid4().hex,
+                              diagnostic_sink=diagnostics.save)
     app = get_workflow(args.workflow).build_graph(runtime)
 
     # 这是传入图的初始状态。
@@ -138,6 +150,7 @@ def main() -> None:
     #     "warnings": [],
     # }
     initial_state: InkFlowState = {
+        "run_id": runtime.owner_id,
         "raw_text": raw_text,
         "source_path": str(input_path) if input_path is not None else "",
         "config": config,
@@ -145,7 +158,22 @@ def main() -> None:
     }
 
     # 与 Web 使用同一个图；终端适配器负责 interrupt 的提问和 resume。
+    started = now()
     final_state = run_terminal(app, runtime.scrub(initial_state))
+    # Completed CLI runs are available as unlinked, read-only history; no document identity is invented.
+    status = 'failed' if final_state.get('failure') else 'stopped' if final_state.get('stopped') else 'completed'
+    attempts = diagnostics.list('run', runtime.owner_id)
+    executions = [{'id': item['id'], 'node': item['node_id'], 'iteration': index + 1, 'status': item['status'],
+                   'started_at': item['started_at'], 'finished_at': item['finished_at'], 'input': {}, 'output': {}}
+                  for index, item in enumerate(attempts) if item['kind'] == 'node']
+    record = runtime.scrub({'id': runtime.owner_id, 'creation_id': uuid4().hex, 'creation_hash': '',
+              'name': input_path.name if input_path else 'CLI 输入', 'status': status, 'created_at': started, 'updated_at': now(),
+              'state': dict(final_state), 'pending': None, 'current_node': executions[-1]['node'] if executions else None,
+              'executions': executions, 'traversed_edges': [], 'artifacts': [], 'event_cursor': 0, 'rerun_of': None,
+              'workflow_id': args.workflow, 'workflow': version['payload']['graph'], 'workflow_version': version['id'],
+              'version_package': version['payload'], 'editor_source': None})
+    store.create(record)
+    store.save_event(record, 'finished', 'CLI 运行已结束；输入、固定版本和节点诊断只读保留。')
 
     report_path = final_state.get("report_path")
 

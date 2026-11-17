@@ -19,7 +19,7 @@ from inkflow.llm import (
     is_llm_enabled,
     load_llm_config,
 )
-from inkflow.prompts import build_redaction_messages
+from inkflow.runtime import WorkflowRuntime, ModelExecutionError
 from inkflow.state import RedactionDecision, RedactionFinding
 
 
@@ -38,6 +38,8 @@ def generate_redaction_findings(
     config_path: Path = DEFAULT_LLM_CONFIG_PATH,
     config: LLMConfig | None = None,
     api_key: str | None = None,
+    runtime: WorkflowRuntime | None = None,
+    strict: bool = False,
 ) -> list[RedactionFinding]:
     """生成脱敏审查 findings。
 
@@ -50,26 +52,25 @@ def generate_redaction_findings(
         return []
 
     config = config or load_llm_config(config_path)
-    numbered_text = add_line_numbers(text)
+    runtime = runtime or WorkflowRuntime(config, api_key)
     try:
-        response_text = call_llm(build_redaction_messages(numbered_text), config=config, api_key=api_key)
+        return runtime.invoke('risk-check', {'numbered_text': add_line_numbers(text)}, parse_findings, call_llm)
     except Exception as error:
-        return [_build_generation_error_finding(error)]
+        if strict:
+            raise
+        return [_build_invalid_json_finding(getattr(error, 'raw_output', '')) if isinstance(error, ModelExecutionError) and error.category == 'output_format'
+                else _build_generation_error_finding(error)]
 
-    try:
-        raw_findings = _parse_json_array(response_text)
-    except ValueError:
-        return [_build_invalid_json_finding(response_text)]
 
-    findings: list[RedactionFinding] = []
-    for index, raw_finding in enumerate(raw_findings, start=1):
-        if not isinstance(raw_finding, dict):
-            return [_build_invalid_json_finding(response_text)]
-        finding = _normalize_finding(raw_finding, index)
-        # 模型 ID 不保证唯一，审核表单使用程序生成的稳定序号。
-        finding["id"] = f"S{index:03d}"
+def parse_findings(response_text):
+    raw_findings = _parse_json_array(response_text)
+    findings = []
+    for index, raw in enumerate(raw_findings, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError('风险数组每项必须为对象。')
+        finding = _normalize_finding(raw, index)
+        finding['id'] = f'S{index:03d}'
         findings.append(finding)
-
     return findings
 
 
@@ -82,6 +83,7 @@ def apply_redaction_with_llm(
     config: LLMConfig | None = None,
     api_key: str | None = None,
     preserve_format: bool = False,
+    runtime: WorkflowRuntime | None = None,
 ) -> str:
     """根据用户确认的修改方案，让 LLM 返回修改后的完整文本。
 
@@ -96,12 +98,9 @@ def apply_redaction_with_llm(
         raise RuntimeError("LLM 未启用，无法执行需要模型改写的脱敏决策。")
 
     config = config or load_llm_config(config_path)
-    result = call_llm(
-        _build_apply_redaction_messages(text, decisions, extra_instruction),
-        config=config,
-        api_key=api_key,
-    )
-    return result if preserve_format else result.strip()
+    runtime = runtime or WorkflowRuntime(config, api_key)
+    return runtime.invoke('redaction-rewrite', rewrite_variables(text, decisions, extra_instruction),
+                          lambda result: result if preserve_format else result.strip(), call_llm)
 
 
 def build_text_diff(before: str, after: str) -> str:
@@ -125,40 +124,13 @@ def _build_apply_redaction_messages(
 ) -> list[LLMMessage]:
     """组装“按用户决策执行脱敏”的 LLM messages。"""
 
-    decisions_text = json.dumps(decisions, ensure_ascii=False, indent=2)
-    extra_text = extra_instruction.strip() or "无"
+    from inkflow.workflow_assets.prompts import builtin_messages
+    return builtin_messages('redaction-rewrite', rewrite_variables(text, decisions, extra_instruction))
 
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你是 InkFlow 的内容脱敏改写助手。"
-                "你只能按照用户已经确认的 decisions 修改文本，不能新增其它改写。"
-                "请尽量保留原文结构、段落顺序、语气和 Markdown 格式。"
-                "只返回修改后的完整正文，不要返回解释、标题、代码块或 diff。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"""请根据下方 decisions 对原文执行脱敏改写。
 
-要求：
-- 只修改 decisions 覆盖的内容。
-- 对每条 decision 使用 user_instruction 作为最终处理方案。
-- 保留原文其它内容不变。
-- 返回完整修改后文本。
-
-decisions:
-{decisions_text}
-
-额外重试建议:
-{extra_text}
-
-原文:
-{text}
-""",
-        },
-    ]
+def rewrite_variables(text, decisions, extra_instruction):
+    return {'text': text, 'decisions_text': json.dumps(decisions, ensure_ascii=False, indent=2),
+            'extra_text': extra_instruction.strip() or '无'}
 
 
 def _parse_json_array(response_text: str) -> list[Any]:

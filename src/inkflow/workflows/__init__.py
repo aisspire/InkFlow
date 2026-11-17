@@ -57,7 +57,14 @@ def _full_check():
                               build_graph, describe, validate_action)
 
 
-WORKFLOWS = {_definition.id: _definition for _definition in [_builtin(), _full_check()]}
+def _redaction_only():
+    from inkflow.actions import validate_action
+    from inkflow.graphs.minimal import build_graph, workflow_description
+    return WorkflowDefinition('redaction-only', '仅脱敏', '风险检查、逐项审核、改写、差异确认与复查；不生成文章或发布。',
+                              lambda runtime: build_graph(runtime, redaction_only=True), workflow_description, validate_action, _publishing_document)
+
+
+WORKFLOWS = {_definition.id: _definition for _definition in [_builtin(), _full_check(), _redaction_only()]}
 
 
 def get_workflow(workflow_id: str = DEFAULT_WORKFLOW_ID) -> WorkflowDefinition:

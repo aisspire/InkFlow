@@ -22,7 +22,8 @@ from inkflow.llm import (
     load_llm_config,
     LLMConfig,
 )
-from inkflow.prompts import build_article_messages
+from inkflow.prompts.article import _format_qa_history
+from inkflow.runtime import WorkflowRuntime
 from inkflow.state import ArticleData
 
 MAX_ARTICLE_QUESTIONS = 3
@@ -36,6 +37,7 @@ def generate_article_data(
     config: LLMConfig | None = None,
     api_key: str | None = None,
     qa_history: list[dict[str, str]] | None = None,
+    runtime: WorkflowRuntime | None = None,
 ) -> dict[str, Any]:
     """只调用一次模型，返回文章或问题；等待用户由独立图节点负责。
 
@@ -48,10 +50,17 @@ def generate_article_data(
         return {"article": build_placeholder_article(text, today=today), "degraded": True}
     config = config or load_llm_config(config_path)
     history = qa_history or []
-    response_text = call_llm(
-        build_article_messages(text, today, history, extra_instruction),
-        config=config, api_key=api_key,
-    )
+    runtime = runtime or WorkflowRuntime(config, api_key)
+    return runtime.invoke('article-generation', article_variables(text, today, history, extra_instruction),
+                          lambda reply: parse_article_response(reply, today, history), call_llm)
+
+
+def article_variables(text, today, history, extra_instruction):
+    return {'text': text, 'today': today, 'history_text': _format_qa_history(history),
+            'instruction_text': extra_instruction.strip() or '无'}
+
+
+def parse_article_response(response_text, today, history):
     response_data = _parse_json_object(response_text)
     if response_data.get("needs_user_input") is True:
         if len(history) >= MAX_ARTICLE_QUESTIONS:

@@ -27,7 +27,7 @@ from inkflow.services.redaction import apply_redaction_with_llm, build_text_diff
 from inkflow.services.report import write_audit_jsonl, write_markdown_report
 from inkflow.settings import SettingsStore, resolve_directory
 from inkflow.state import InkFlowState
-from inkflow.runtime import WorkflowRuntime
+from inkflow.runtime import WorkflowRuntime, error_category
 
 
 # 布局只描述展示位置，不允许浏览器编辑图。边来自实际编译的图。
@@ -43,6 +43,7 @@ NODE_META = {
     "write_review": ("保存审阅稿", "落盘当前文档并计算博客目标与覆盖信息。", 2, 2),
     "final_review": ("编辑与审阅", "显式保存编辑后可结束、写入博客或退回上游。", 2, 3),
     "publish": ("写入博客", "核对目标后仅写入 <slug>/index.mdx。", 1, 3),
+    "finish_redaction": ("结束脱敏处理", "结束本轮，源文件仍需显式保存。", 0, 2),
     "report": ("生成报告", "保存 Markdown 报告与完整 JSONL 审计记录。", 0, 3),
 }
 
@@ -63,6 +64,7 @@ ROUTES = {
 }
 
 INPUT_FIELDS = {
+    "finish_redaction": ["redaction_findings", "review_status", "failure"],
     "preprocess": ["raw_text"], "redaction_plan": ["clean_text", "redacted_text"],
     "redaction_review": ["redaction_findings"],
     "apply_redaction": ["redacted_text", "clean_text", "redaction_decisions", "redaction_instruction"],
@@ -101,7 +103,8 @@ def preprocess_node(state: InkFlowState) -> dict:
 
 def redaction_review_node(state: InkFlowState) -> dict:
     choice = _wait("redaction_review", findings=state.get("redaction_findings", []),
-                   llm_enabled=state.get("config", {}).get("llm", {}).get("enabled", False))
+                   llm_enabled=state.get("config", {}).get("llm", {}).get("enabled", False),
+                   redaction_only=state.get("config", {}).get("redaction_only", False))
     if choice["action"] == "stop":
         return _stopped()
     decisions = choice["decisions"]
@@ -135,12 +138,13 @@ def package_node(state: InkFlowState) -> dict:
 
 def _directory(state: InkFlowState, name: str) -> Path:
     config = state.get("config", {})
+    config = {**config, **config.get("node_config", {}).get("write_review" if name == "review" else "report", {})}
     return resolve_directory(config.get(name, {}).get("dir", f"{name}s"), Path(config.get("_config_dir", ".")))
 
 
 def _blog(state: InkFlowState) -> tuple[Path, str]:
     config = state.get("config", {})
-    blog = config.get("blog", {})
+    blog = config.get("node_config", {}).get("publish", {}).get("blog", config.get("blog", {}))
     if not blog.get("repo_path"):
         raise ValueError("未设置博客仓库路径；可先保存审阅稿并结束。")
     return (resolve_directory(blog["repo_path"], Path(config.get("_config_dir", "."))),
@@ -201,7 +205,7 @@ def report_node(state: InkFlowState) -> dict:
     return {"report_path": str(markdown), "report_jsonl_path": str(audit), "next_node": END}
 
 
-def _tracked(name: str, function: Callable, runtime: WorkflowRuntime):
+def _tracked(name: str, function: Callable, runtime: WorkflowRuntime, redaction_only=False):
     def node(state: InkFlowState) -> dict:
         writer = get_stream_writer()
         stopping_at_report = name == "report" and runtime.stop.is_set() and not state.get("failure")
@@ -210,15 +214,20 @@ def _tracked(name: str, function: Callable, runtime: WorkflowRuntime):
             state = {**state, **_stopped()}
         writer(runtime.scrub({"type": "node_started", "node": name,
                               "input": {key: state[key] for key in INPUT_FIELDS[name] if key in state}}))
-        if runtime.stop.is_set() and name != "report":
+        if runtime.stop.is_set() and name not in {"report", "finish_redaction"}:
             writer({"type": "node_skipped", "node": name, "summary": "已在安全节点边界停止"})
             update = _stopped()
         else:
             try:
-                update = function(state)
+                with runtime.node(name, {key: state[key] for key in INPUT_FIELDS[name] if key in state}) as attempt:
+                    update = function(state)
+                    attempt['output'] = update
             except GraphInterrupt:
                 raise
             except Exception as error:
+                if error_category(error) == 'stopped':
+                    writer({'type': 'node_skipped', 'node': name, 'summary': '模型结果返回后已停止，未采用结果。'})
+                    return {**_stopped(), 'next_node': 'finish_redaction' if redaction_only else 'report'}
                 # 不把第三方原始异常（可能含请求/密钥）写入日志。
                 message = str(error) if isinstance(error, (ValueError, OSError)) else f"执行失败（{type(error).__name__}），请检查设置后重新运行。"
                 message = runtime.scrub(message)
@@ -226,6 +235,8 @@ def _tracked(name: str, function: Callable, runtime: WorkflowRuntime):
                 update = {"failure": message, "approved": False, "review_status": f"{name}_failed",
                           "warnings": [*state.get("warnings", []), message],
                           "next_node": END if name == "report" else "report"}
+        if redaction_only and update.get('next_node') in {'article_generation', 'report'}:
+            update['next_node'] = 'finish_redaction'
         update = runtime.scrub(update)
         if stopping_at_report:
             update = {**_stopped(), **update}
@@ -235,19 +246,21 @@ def _tracked(name: str, function: Callable, runtime: WorkflowRuntime):
     return node
 
 
-def build_graph(runtime: WorkflowRuntime | None = None):
+def build_graph(runtime: WorkflowRuntime | None = None, *, redaction_only=False):
     if runtime is None:
         _, llm, key = SettingsStore(Path("config.toml")).snapshot()
         runtime = WorkflowRuntime(llm, key)
 
     def plan(state: InkFlowState) -> dict:
-        findings = generate_redaction_findings(_source(state), config=runtime.llm, api_key=runtime.api_key)
+        if redaction_only and (not runtime.llm.enabled or not runtime.api_key):
+            raise ValueError('仅脱敏需要启用模型并配置密钥；当前未完成风险检查。')
+        findings = generate_redaction_findings(_source(state), config=runtime.llm, api_key=runtime.api_key, runtime=runtime, strict=redaction_only)
         return {"redaction_findings": findings, "checked_text": _source(state), "next_node": "redaction_review"}
 
     def apply(state: InkFlowState) -> dict:
         decisions = [x for x in state.get("redaction_decisions", []) if x["action"] == "apply"]
         candidate = apply_redaction_with_llm(_source(state), decisions, state.get("redaction_instruction", ""),
-                                             config=runtime.llm, api_key=runtime.api_key, preserve_format=state.get('editor_bound', False))
+                                             config=runtime.llm, api_key=runtime.api_key, preserve_format=state.get('editor_bound', False), runtime=runtime)
         return {"candidate_text": candidate, "redaction_diff": build_text_diff(_source(state), candidate),
                 "next_node": "diff_review"}
 
@@ -255,7 +268,7 @@ def build_graph(runtime: WorkflowRuntime | None = None):
         warnings = list(state.get("warnings", []))
         try:
             result = generate_article_data(_source(state), extra_instruction=state.get("article_feedback", ""),
-                                           qa_history=state.get("qa_history", []), config=runtime.llm, api_key=runtime.api_key)
+                                           qa_history=state.get("qa_history", []), config=runtime.llm, api_key=runtime.api_key, runtime=runtime)
         except Exception as error:
             warnings.append(f"文章生成失败（{type(error).__name__}），已使用本地占位文章；请人工审阅。")
             result = {"article": build_placeholder_article(_source(state)), "degraded": True}
@@ -266,17 +279,27 @@ def build_graph(runtime: WorkflowRuntime | None = None):
         return {"article_data": result["article"], "degraded": result["degraded"], "warnings": warnings,
                 "approved": False, "question": "", "next_node": "package"}
 
-    functions = {"preprocess": preprocess_node, "redaction_plan": plan, "redaction_review": redaction_review_node,
+    functions = {"preprocess": (lambda state: preprocess_node({**state, "editor_bound": True})) if redaction_only else preprocess_node, "redaction_plan": plan, "redaction_review": redaction_review_node,
                  "apply_redaction": apply, "diff_review": diff_review_node, "article_generation": generate,
                  "article_question": article_question_node, "package": package_node, "write_review": write_review_node,
                  "final_review": final_review_node, "publish": publish_node, "report": report_node}
+    routes = ROUTES
+    if redaction_only:
+        def finish(state):
+            return {'next_node': END, 'stopped': runtime.stop.is_set() or state.get('stopped', False),
+                    'review_status': 'stopped_by_user' if runtime.stop.is_set() or state.get('stopped') else 'risk_check_failed' if state.get('failure') else
+                    'ended_with_remaining_risks' if state.get('redaction_findings') else 'checked_no_risks'}
+        functions = {key: functions[key] for key in ('preprocess', 'redaction_plan', 'redaction_review', 'apply_redaction', 'diff_review')}
+        functions['finish_redaction'] = finish
+        routes = {key: list(dict.fromkeys('finish_redaction' if target in {'article_generation', 'report'} else target for target in ROUTES[key])) for key in functions if key in ROUTES}
+        routes['finish_redaction'] = [END]
     graph = StateGraph(InkFlowState)
     for name, function in functions.items():
-        graph.add_node(name, _tracked(name, function, runtime))
+        graph.add_node(name, runtime.wrap_node(name, _tracked(name, function, runtime, redaction_only)))
     graph.add_edge(START, "preprocess")
-    for name, destinations in ROUTES.items():
+    for name, destinations in routes.items():
         graph.add_conditional_edges(name, lambda state: state["next_node"], {target: target for target in destinations})
-    return graph.compile(checkpointer=InMemorySaver())
+    return graph.compile(checkpointer=runtime.checkpointer or InMemorySaver())
 
 
 def workflow_description(graph) -> dict:

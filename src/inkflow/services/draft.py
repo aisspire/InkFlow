@@ -30,8 +30,10 @@ def generate_draft(
         return build_placeholder_draft(clean_text)
 
     config = load_llm_config(config_path)
-    messages = build_draft_messages(clean_text)
-    return call_llm(messages, config=config)
+    import os
+    from inkflow.runtime import WorkflowRuntime
+    runtime = WorkflowRuntime(config, os.environ.get(config.api_key_env) or '')
+    return runtime.invoke('legacy-draft', {'clean_text': clean_text}, lambda value: value, call_llm)
 
 
 def build_placeholder_draft(clean_text: str) -> str:

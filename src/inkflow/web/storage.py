@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from inkflow.services.file_permissions import private_directory, restrict_access
 from inkflow.workflows import DEFAULT_WORKFLOW_ID, get_workflow
+
+_transactions = threading.local()
 
 
 def now() -> str:
@@ -23,6 +26,8 @@ def encode(value) -> str:
 def workflow_record(record: dict) -> dict:
     """旧运行在读取时归入内置流程，保留原始数据库与事件。"""
     record.setdefault("workflow_id", DEFAULT_WORKFLOW_ID)
+    record.setdefault("workflow_version", None)
+    record.setdefault("version_label", "旧版，提示词版本未知" if not record.get("workflow_version") else record["workflow_version"])
     if "workflow" not in record:
         record["workflow"] = get_workflow(record["workflow_id"]).describe()
     return record
@@ -70,6 +75,10 @@ class HistoryStore:
 
     @contextmanager
     def connection(self):
+        active = getattr(_transactions, 'connections', {}).get(str(self.path))
+        if active is not None:
+            yield active
+            return
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
@@ -78,6 +87,21 @@ class HistoryStore:
                 yield db
         finally:
             db.close()
+
+    @contextmanager
+    def transaction(self):
+        """Share one transaction across run actions and document services in this thread."""
+        connections = getattr(_transactions, 'connections', {})
+        if str(self.path) in connections:
+            yield connections[str(self.path)]
+            return
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            _transactions.connections = {**connections, str(self.path): db}
+            try:
+                yield db
+            finally:
+                _transactions.connections = connections
 
     def get(self, run_id: str) -> dict:
         with self.connection() as db:
@@ -91,9 +115,12 @@ class HistoryStore:
             row = db.execute("SELECT payload FROM runs WHERE creation_id=?", (creation_id,)).fetchone()
         return workflow_record(json.loads(row["payload"])) if row else None
 
-    def list(self, limit: int = 50, offset: int = 0, workspace=None, path=None, unlinked=False) -> list[dict]:
+    def list(self, limit: int = 50, offset: int = 0, workspace=None, path=None, unlinked=False, document_id=None) -> list[dict]:
         with self.connection() as db:
             clauses, parameters = [], []
+            if document_id is not None:
+                clauses.append("json_extract(payload,'$.editor_source.document_id')=?")
+                parameters.append(document_id)
             if workspace is not None:
                 clauses.append("json_extract(payload,'$.editor_source.workspace')=?")
                 parameters.append(workspace)
@@ -122,7 +149,7 @@ class HistoryStore:
                        record["status"], record["created_at"], record["updated_at"], encode(record)))
             if record.get('editor_source') and record['status'] in {'running', 'waiting', 'stopping'}:
                 source = record['editor_source']
-                key = encode([source['workspace'], source['path']])
+                key = source.get('document_id') or encode([source['workspace'], source['path']])
                 db.execute('INSERT INTO article_active VALUES (?,?)', (key, record['id']))
 
     def save_event(self, record: dict, event_type: str, summary: str, **details) -> dict:
@@ -132,6 +159,9 @@ class HistoryStore:
         record["updated_at"] = now()
         execution = next((x for x in reversed(record["executions"]) if x["node"] == record.get("current_node")), {})
         event = {"seq": record["event_cursor"], "time": record["updated_at"], "type": event_type,
+                 'run_id': record['id'], 'workflow_id': record['workflow_id'], 'version_id': record.get('workflow_version'),
+                 'document_id': (record.get('editor_source') or {}).get('document_id'), 'node_id': record.get('current_node'),
+                 'attempt_id': execution.get('attempt_id'),
                  "node": record.get("current_node"), "execution_id": execution.get("id"),
                  "iteration": execution.get("iteration"), "status": record["status"], "summary": summary, **details}
         with self.connection() as db:
@@ -163,10 +193,12 @@ class HistoryStore:
             rows = db.execute("SELECT payload FROM runs WHERE status IN ('running','waiting','stopping')").fetchall()
         for row in rows:
             record = workflow_record(json.loads(row["payload"]))
+            if record.get('recovery_protocol'):
+                continue
             record.update(status="interrupted", pending=None)
             for execution in record["executions"]:
                 if execution["status"] in {"running", "waiting"}:
                     execution.update(status="interrupted", finished_at=now())
             self.save_event(record, "interrupted", "服务已重启，内存检查点失效；可使用原输入重新运行。")
         with self.connection() as db:
-            db.execute('DELETE FROM article_active')
+            db.execute("DELETE FROM article_active WHERE run_id IN (SELECT id FROM runs WHERE status IN ('completed','failed','stopped','interrupted'))")
