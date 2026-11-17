@@ -4,6 +4,8 @@ llm.toml
 docs/*
 !docs/index.md
 !docs/workbench-and-workflows.md
+!docs/workflow-assets.md
+!docs/workflow-definitions.md
 !docs/technology-decisions.md
 !docs/inkflow-architecture/
 docs/inkflow-architecture/*
@@ -23,3 +25,9 @@ implementation-notes.md
 node_modules/
 frontend/dist/
 *.tsbuildinfo
+
+!docs/durable-execution.md
+!docs/automations.md
+!docs/ai-orchestration.md
+start.ps1
+!docs/frontend-navigation.md

@@ -15,6 +15,10 @@
 
 当前顶层索引见 [docs/index.md](../index.md)；原提交总览仅作为历史资料。
 
+## 演进设计与实施状态
+
+[多场景工作入口与架构演进方案](07-workspace-workflow-evolution.md) 基于 2026-11-13 的源码审视，说明独立文件与工作区入口、文档／定义／运行／持续任务分层、提示词编辑、发布配置、持久执行、热更新及 AI 修复，并给出阶段交付和验收条件。P1–P6 已实施；上方六篇文档描述当前实现。
+
 ## 证据等级
 
 - **代码确认**：在当前提交的源码、配置或依赖清单中可直接定位。
@@ -24,6 +28,10 @@
 ## 当前边界
 
 - InkFlow 是一个本地单用户内容工具的代码形态：既有 CLI，也有由 FastAPI 提供本机构建页面的 React 工作台；不应将它描述成多租户云服务。
-- 全文检查与文章处理共用注册表和 RunManager 生命周期；文章工作副本由 EditorService 管理。Web 运行按文章单活，不同文章可分别启动；CLI 保留独立输入。
+- 全文检查与文章处理共用注册表和 RunManager 生命周期；DocumentService 管理独立文档身份并复用 EditorService 编辑操作，WorkspaceService 负责目录登记与发现。Web 运行按文章单活，不同文章可分别启动；CLI 保留独立输入。
 - 当前文档索引、工作台规则、技术选型与本目录 Markdown 通过 Git 忽略例外随源码交付；其它本地资料与根目录 `implementation-notes.md` 继续忽略。
-- 图中的 `InMemorySaver` 只表示进程内 checkpoint；SQLite 保存业务历史与事件，不持久化此 checkpoint。
+- 历史图中的 `InMemorySaver` 仅适用于 CLI 与模拟；正式 Web 运行使用 P4 SQLiteSaver，SQLite 同时保存执行检查点与业务历史。
+
+P2 实际资产、提示词编辑、版本绑定、仅脱敏与诊断规则见 [当前行为](../workflow-assets.md)。
+
+P4 当前恢复协议与文件对账边界见 [持久执行与恢复](../durable-execution.md)；[P5 持续关注](../automations.md) 已实施，[P6 AI 编排与修复](../ai-orchestration.md) 已实施。
