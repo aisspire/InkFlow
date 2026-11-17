@@ -1,4 +1,4 @@
-export type Status = 'idle' | 'running' | 'waiting' | 'completed' | 'failed' | 'skipped' | 'stopped' | 'stopping' | 'interrupted';
+export type Status = 'idle' | 'running' | 'waiting' | 'completed' | 'failed' | 'skipped' | 'stopped' | 'stopping' | 'interrupted' | 'recovering' | 'verification_required' | 'recovery_blocked';
 export type Article = {
   title: string; slug: string; description: string; date: string;
   tags: string[]; authors: string[]; draft: boolean; body: string;
@@ -9,8 +9,9 @@ export type Finding = {
 };
 export type Target = { path?: string; exists?: boolean; fingerprint?: string | null; error?: string };
 export type Pending = {
-  id: string; node: string; kind: 'suggestion_review' | 'redaction_review' | 'diff_review' | 'article_question' | 'final_review';
-  findings?: Finding[]; llm_enabled?: boolean; diff?: string; candidate_text?: string;
+  id: string; node: string; kind: 'suggestion_review' | 'redaction_review' | 'diff_review' | 'article_question' | 'final_review' | 'article_metadata' | 'local_output';
+  interaction_type?: string; simulated?: boolean; overwrite_policy?: string; before_text?: string;
+  redaction_only?: boolean; findings?: Finding[]; llm_enabled?: boolean; diff?: string; candidate_text?: string;
   question?: string; question_number?: number; article?: Article; document?: string;
   revision?: number; publish_preview?: Target; review_path?: string; no_publish?: boolean; degraded?: boolean;
 };
@@ -22,13 +23,17 @@ export type RunEvent = {
   seq: number; time: string; type: string; node?: string; execution_id?: string;
   iteration?: number; status: Status; summary: string;
 };
-export type RunSummary = { id: string; name: string; status: Status; created_at: string; updated_at: string; workflow_id: string; workflow_name?: string; editor_source?: { workspace: string; path: string; revision: string; text_hash: string } | null; pending_count?: number };
+export type RunSummary = { id: string; name: string; status: Status; created_at: string; updated_at: string; workflow_id: string; workflow_name?: string; editor_source?: { document_id: string; workspace: string; path: string; revision: string; text_hash: string } | null; pending_count?: number };
 export type Run = RunSummary & {
-  editor_source?: { workspace: string; path: string; revision: string; text_hash: string } | null;
+  repair_of?: { run_id: string; node_id: string; attempt_id: string; version_id: string; proposal_id: string; input_digest: string; reused_artifacts: boolean };
+  recovery_message?: string | null;
+  effects?: { id: string; state: string; path: string; sha256: string; node: string }[];
+  editor_source?: { document_id: string; workspace: string; path: string; revision: string; text_hash: string } | null;
   feedback_history?: { suggestion_id: string; feedback: string }[];
   annotations: import('./EditorWorkbench').Suggestion[]; annotation_snapshot: string;
   editor_base?: { revision: string; text_hash: string };
   document_result: WorkflowDocumentResult | null;
+  workflow_version?: string | null; version_package?: import('./WorkflowStudio').VersionPackage;
   workflow: Workflow;
   event_cursor: number; current_node: string | null; pending: Pending | null; events: RunEvent[];
   executions: Execution[]; traversed_edges: { source: string; target: string; time: string }[];
@@ -40,7 +45,7 @@ export type Run = RunSummary & {
 };
 export type WorkflowDocumentResult = { id: string; text: string; kind: string; label: string };
 export type WorkflowImport = { run_id: string; workflow_id: string; result_id: string; kind: string; label: string };
-export type WorkflowApplyRequest = { runId: string; path: string; revision: string; text: string; result_id: string; confirm_conflict: boolean };
+export type WorkflowApplyRequest = { runId: string; document_id: string; path: string; revision: string; text: string; result_id: string; confirm_conflict: boolean };
 export type WorkflowSummary = { id: string; name: string; description: string };
 export type Workflow = WorkflowSummary & {
   nodes: { id: string; label: string; description: string; position: { x: number; y: number }; human: boolean }[];

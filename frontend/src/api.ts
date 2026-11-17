@@ -13,7 +13,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   if (!response.ok) {
     const value = await response.json().catch(() => ({}));
-    throw new Error(typeof value.detail === 'string' ? value.detail : `请求失败（${response.status}）`);
+    throw Object.assign(new Error(typeof value.detail === 'string' ? value.detail : `请求失败（${response.status}）`), { issues: value.errors ?? [] });
   }
   return response.json() as Promise<T>;
 }

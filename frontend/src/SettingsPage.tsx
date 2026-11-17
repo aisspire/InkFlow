@@ -1,3 +1,4 @@
+import PublishProfiles from './PublishProfiles';
 import { useEffect, useState } from 'react';
 import { Alert, Button, CircularProgress, FormControlLabel, Switch, TextField, Typography } from '@mui/material';
 import KeyOutlined from '@mui/icons-material/KeyOutlined';
@@ -25,7 +26,7 @@ export default function SettingsPage() {
     try {
       const { llm, blog, review, report } = settings;
       setSettings(await api<Settings>('/settings', { method: 'PUT', body: JSON.stringify({ llm, blog, review, report }) }));
-      setSuccess('设置已保存，仅对后续创建的任务生效。');
+      setSuccess('应用默认值已保存。已有启用流程与在途运行保留固定配置；请在流程版本中显式导入或修改、保存并启用。');
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   }
   async function saveKey(clear: boolean) {
@@ -33,15 +34,16 @@ export default function SettingsPage() {
     try {
       const result = await api<Pick<Settings, 'api_key_configured' | 'local_key_saved'>>('/settings/api-key', { method: clear ? 'DELETE' : 'PUT', ...(clear ? {} : { body: JSON.stringify({ api_key: key }) }) });
       setSettings(current => current ? { ...current, ...result } : current); setKey('');
-      setSuccess(clear ? '本地密钥已清除；如环境变量已配置，将继续使用环境变量。' : '本地密钥已保存，仅影响后续任务。');
+      setSuccess(clear ? '本地密钥已清除；如环境变量已配置，将继续使用环境变量。' : '本地密钥已保存，用于后续凭据解析；已发送的模型请求不受影响。');
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   }
   return <main className="page-scroll"><div className="settings-page">
-    <div className="page-heading"><SettingsOutlined /><div><Typography variant="h5">设置</Typography><Typography color="text.secondary" variant="body2">管理模型和本地输出目录。运行中的任务保留原有配置。</Typography></div></div>
+    <div className="page-heading"><SettingsOutlined /><div><Typography variant="h5" data-page-heading tabIndex={-1}>设置</Typography><Typography color="text.secondary" variant="body2">应用默认值、凭据和共享发布配置。流程版本配置在工作流中管理，工作区浏览偏好保存在本浏览器。</Typography></div></div>
     {error && <Alert severity="error" action={!settings && <Button onClick={() => void load()}>重试</Button>}>{error}</Alert>}
     {success && <Alert severity="success" role="status">{success}</Alert>}
     {!settings && !error && <CircularProgress aria-label="正在读取设置" />}
     {settings && <>
+      <Alert severity="info">此处是应用默认值。修改默认值不会直接更新已有启用流程；流程内模型和目录配置随版本固定。</Alert>
       <section className="settings-section"><div className="section-intro"><Typography variant="h6">模型服务</Typography><FormControlLabel control={<Switch checked={settings.llm.enabled} onChange={e => setSettings({ ...settings, llm: { ...settings.llm, enabled: e.target.checked } })} />} label="启用真实模型" /></div>
         {!settings.llm.enabled && <Alert severity="info" sx={{ mb: 3 }}>关闭后仍可编辑本地文章，全文检查不可用；任务流程使用本地占位结果。</Alert>}
         <div className="fields-grid">
@@ -68,6 +70,7 @@ export default function SettingsPage() {
         <TextField label="替换为新的 API Key" type="password" value={key} autoComplete="new-password" onChange={e => setKey(e.target.value)} />
         <div className="button-row"><Button variant="outlined" disabled={busy || !key.trim()} onClick={() => void saveKey(false)}>保存新密钥</Button><Button color="error" disabled={busy || !settings.local_key_saved} onClick={() => void saveKey(true)}>清除本地密钥</Button></div>
       </section>
+      <PublishProfiles />
     </>}
   </div></main>;
 }

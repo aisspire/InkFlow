@@ -11,6 +11,11 @@ const editCompartments = new Map<string, Compartment>();
 const callbackCache = new Map<string, { onChange: (text: string, changes: { from: number; to: number; inserted: string }[]) => void; onSelect: (id: string) => void }>();
 const sessions = new Map<string, { state: EditorState; scroll: ReturnType<EditorView['scrollSnapshot']> }>();
 
+export function forgetEditorSession(documentKey: string) {
+  sessions.delete(documentKey); externalFlags.delete(documentKey);
+  editCompartments.delete(documentKey); callbackCache.delete(documentKey);
+}
+
 class SuggestionNumber extends WidgetType {
   constructor(readonly id: string, readonly number: number, readonly kind: Suggestion['kind']) { super(); }
   toDOM() { const node = document.createElement('button'); node.type = 'button'; node.className = `inline-suggestion-number ${this.kind}`; node.textContent = String(this.number).padStart(2,'0'); node.setAttribute('data-suggestion', this.id); node.setAttribute('aria-label', '定位建议 ' + this.number); return node; }

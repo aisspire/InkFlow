@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, requestId } from './api';
 import { terminal, type Run, type RunSummary, type Workflow, type WorkflowSummary } from './types';
 
-export function useWorkflow(path: string | null, workspace: string) {
+export function useWorkflow(path: string | null) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [workflowId, setWorkflowId] = useState('full-check');
   const [definition, setDefinition] = useState<Workflow | null>(null);
@@ -16,26 +16,28 @@ export function useWorkflow(path: string | null, workspace: string) {
   const [reconnect, setReconnect] = useState(0);
   const choices = useRef<Record<string, string>>({}), nodes = useRef<Record<string, string | null>>({});
   const pendingSeen = useRef<Record<string, string>>({});
-  const context = `${workspace}|${path ?? ''}`;
+  const context = path ?? '';
+  const scope = path && !legacy ? `document_id=${encodeURIComponent(path)}` : '';
+  const runUrl = (id: string, suffix = '') => `/runs/${id}${suffix}${scope ? '?' + scope : ''}`;
   const current = useRef({ context, runId }); current.current = { context, runId };
   const actionAttempt = useRef<{ signature: string; id: string } | null>(null);
   const submitting = useRef(false);
-  const listUrl = legacy ? '/runs?unlinked=true' : path ? `/runs?path=${encodeURIComponent(path)}` : '/runs?workspace=true';
+  const listUrl = legacy ? '/runs?unlinked=true' : path ? `/runs?document_id=${encodeURIComponent(path)}` : '/runs?unlinked=true';
   const loadHistory = useCallback(async () => {
     if (!path && !legacy) { setHistory([]); setHistoryMore(false); return; }
     const rows = await api<RunSummary[]>(listUrl);
     if (current.current.context === context) { setHistory(rows); setHistoryMore(rows.length === 50); }
   }, [listUrl, context, path, legacy]);
   const loadRun = useCallback(async (id: string) => {
-    const value = await api<Run>(`/runs/${id}`);
+    const value = await api<Run>(runUrl(id));
     if (current.current.context === context && current.current.runId === id) {
       setRun(old => old?.id === id && old.event_cursor > value.event_cursor ? old : value);
       setSelected(old => old ?? nodes.current[id] ?? value.pending?.node ?? value.current_node);
     }
     return value;
-  }, [context]);
+  }, [context, legacy]);
   const refreshArticles = useCallback(async () => {
-    const value = await api<Record<string, RunSummary>>('/article-runs');
+    const value = await api<Record<string, RunSummary>>('/document-runs');
     setArticleRuns(value);
     return value;
   }, []);
@@ -46,7 +48,7 @@ export function useWorkflow(path: string | null, workspace: string) {
     return () => { disposed = true; clearInterval(timer); };
   }, [refreshArticles]);
   useEffect(() => {
-    try { choices.current = JSON.parse(localStorage.getItem(`inkflow-run-choices:${workspace}`) || '{}'); } catch { choices.current = {}; }
+    try { choices.current = JSON.parse(localStorage.getItem('inkflow-run-choices:documents') || '{}'); } catch { choices.current = {}; }
     setLegacy(false); setRun(null); setSelected(null); setRunId(null); setHistory([]);
     let disposed = false;
     if (path) void refreshArticles().then(all => {
@@ -55,7 +57,7 @@ export function useWorkflow(path: string | null, workspace: string) {
       current.current.runId = id; setRunId(id);
     }).catch(err => { if (!disposed) setError((err as Error).message); });
     return () => { disposed = true; };
-  }, [context, path, workspace, refreshArticles]);
+  }, [context, path, refreshArticles]);
   useEffect(() => { void loadHistory().catch(err => setError((err as Error).message)); }, [loadHistory, articleRuns[path ?? '']?.updated_at]);
   useEffect(() => {
     if (run?.pending && pendingSeen.current[run.id] !== run.pending.id) {
@@ -64,7 +66,7 @@ export function useWorkflow(path: string | null, workspace: string) {
       setSelected(run.pending.node);
     }
   }, [run?.id, run?.pending?.id]);
-  useEffect(() => { void api<WorkflowSummary[]>('/workflows').then(setWorkflows).catch(err => setError((err as Error).message)); }, [reconnect]);
+  useEffect(() => { const refresh = () => { void api<WorkflowSummary[]>('/workflows').then(setWorkflows).catch(err => setError((err as Error).message)); }; refresh(); window.addEventListener('inkflow-workflows-changed', refresh); return () => window.removeEventListener('inkflow-workflows-changed', refresh); }, [reconnect]);
   useEffect(() => {
     let disposed = false;
     void api<Workflow>(`/workflows/${workflowId}`).then(value => { if (!disposed) setDefinition(value); }).catch(err => { if (!disposed) setError((err as Error).message); });
@@ -84,7 +86,7 @@ export function useWorkflow(path: string | null, workspace: string) {
         const value = await loadRun(runId);
         if (disposed) return;
         if (terminal(value.status)) { setConnection('connected'); return; }
-        source = new EventSource(`/api/runs/${runId}/events?after=${value.event_cursor}`);
+        source = new EventSource(`/api/runs/${runId}/events?after=${value.event_cursor}&${scope}`);
         source.onopen = () => { if (!disposed) { setConnection('connected'); refresh(); } };
         source.onerror = () => { if (!disposed) setConnection('offline'); };
         source.addEventListener('run_event', refresh);
@@ -98,7 +100,7 @@ export function useWorkflow(path: string | null, workspace: string) {
   }, [runId, loadRun, reconnect, refreshArticles]);
   function openRun(value: RunSummary) {
     if (value.id !== runId) { setRun(null); setSelected(nodes.current[value.id] ?? null); }
-    if (value.editor_source) { choices.current[context] = value.id; localStorage.setItem(`inkflow-run-choices:${workspace}`, JSON.stringify(choices.current)); }
+    if (value.editor_source) { choices.current[context] = value.id; localStorage.setItem('inkflow-run-choices:documents', JSON.stringify(choices.current)); }
     current.current.runId = value.id; setRunId(value.id);
   }
   async function act(action: string, payload: Record<string, unknown> = {}) {
@@ -108,7 +110,7 @@ export function useWorkflow(path: string | null, workspace: string) {
     const signature = JSON.stringify([id, data]);
     if (actionAttempt.current?.signature !== signature) actionAttempt.current = { signature, id: requestId() };
     try {
-      await api(`/runs/${id}/actions`, { method: 'POST', body: JSON.stringify({ ...data, request_id: actionAttempt.current.id }) });
+      await api(runUrl(id, '/actions'), { method: 'POST', body: JSON.stringify({ ...data, request_id: actionAttempt.current.id }) });
       await loadRun(id); await refreshArticles(); await loadHistory();
     } catch (err) { void loadRun(id).catch(() => undefined); throw err; }
     finally { submitting.current = false; setBusy(false); }
@@ -120,7 +122,7 @@ export function useWorkflow(path: string | null, workspace: string) {
   }
   const summary = articleRuns[path ?? ''];
   const active = summary && !terminal(summary.status) ? summary : null;
-  const visibleRun = run && (legacy && !run.editor_source || run.editor_source?.workspace === workspace && run.editor_source?.path === path) ? run : null;
+  const visibleRun = run && (legacy && !run.editor_source || run.editor_source?.document_id === path) ? run : null;
   return { workflows, workflowId, setWorkflowId, workflow: visibleRun?.workflow ?? definition, history, historyMore, more,
     run: visibleRun, selected, setSelected: (id: string | null) => { if (runId) nodes.current[runId] = id; setSelected(id); },
     connection, error, setError, busy, openRun, act, created, refresh: () => runId ? loadRun(runId) : Promise.resolve(null),
